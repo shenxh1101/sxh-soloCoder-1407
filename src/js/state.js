@@ -309,15 +309,17 @@ function saveTeams(teams) {
 }
 
 function createTeam(options) {
-  const { name, roomType, checkInDate, nights, count, contact = '', remark = '' } = options;
+  const { name, roomType, checkInDate, nights, count, contact = '', remark = '', manualRate = null } = options;
   const teams = getTeams();
   const team = {
     id: genId('team'),
     name,
     roomType,
     checkInDate,
+    checkOutDate: addDays(checkInDate, nights),
     nights,
     count,
+    manualRate,
     contact,
     remark,
     status: TeamStatus.PENDING,

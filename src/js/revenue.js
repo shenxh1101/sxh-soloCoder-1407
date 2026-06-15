@@ -95,6 +95,21 @@ function getBookingHeatmap(days = 7) {
 function getRevenueBreakdown(days = 7) {
   const today = getToday();
   const result = [];
+  const aggregate = {
+    totalRevenue: 0,
+    totalRecognized: 0,
+    totalPending: 0,
+    totalCancelled: 0,
+    walkInRevenue: 0,
+    teamRevenue: 0,
+    manualRevenue: 0,
+    dynamicRevenue: 0,
+    walkInNights: 0,
+    teamNights: 0,
+    manualNights: 0,
+    dynamicNights: 0,
+    byDate: []
+  };
   for (let i = 0; i < days; i++) {
     const date = addDays(today, i);
     const ledger = getRevenueLedger(date);
@@ -105,7 +120,20 @@ function getRevenueBreakdown(days = 7) {
     const cancelled = ledger.totals.cancelledRevenue;
     const cancelledCount = ledger.cancelled.length;
 
-    result.push({
+    aggregate.totalRevenue += recognized + pending;
+    aggregate.totalRecognized += recognized;
+    aggregate.totalPending += pending;
+    aggregate.totalCancelled += cancelled;
+    aggregate.walkInRevenue += ledger.totals.walkInRevenue;
+    aggregate.teamRevenue += ledger.totals.teamRevenue;
+    aggregate.manualRevenue += ledger.totals.manualRevenue;
+    aggregate.dynamicRevenue += ledger.totals.dynamicRevenue;
+    aggregate.walkInNights += ledger.totals.walkInNights;
+    aggregate.teamNights += ledger.totals.teamNights;
+    aggregate.manualNights += ledger.totals.manualNights;
+    aggregate.dynamicNights += ledger.totals.dynamicNights;
+
+    const dateEntry = {
       date,
       recognized,
       recognizedCount,
@@ -118,10 +146,22 @@ function getRevenueBreakdown(days = 7) {
       bySource: {
         dynamic: ledger.totals.dynamicRevenue,
         manual: ledger.totals.manualRevenue
+      },
+      byCustomer: {
+        walkIn: ledger.totals.walkInRevenue,
+        team: ledger.totals.teamRevenue
+      },
+      byNights: {
+        walkIn: ledger.totals.walkInNights,
+        team: ledger.totals.teamNights,
+        manual: ledger.totals.manualNights,
+        dynamic: ledger.totals.dynamicNights
       }
-    });
+    };
+    aggregate.byDate.push(dateEntry);
+    result.push(dateEntry);
   }
-  return result;
+  return { days: result, aggregate };
 }
 
 export {

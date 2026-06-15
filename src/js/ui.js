@@ -42,6 +42,7 @@ import {
   allocateTeam,
   rescheduleTeam,
   cancelTeamBooking,
+  cancelAllTeamBookings,
   getTeamBookings
 } from './rooms.js';
 
@@ -283,14 +284,28 @@ function openRoomDetailModal(room, todayStatus, allBookings) {
   document.querySelectorAll('[data-checkout]').forEach(btn => {
     btn.addEventListener('click', () => {
       const bid = btn.dataset.checkout;
-      if (!confirm(`确认退房/取消该预订吗？`)) return;
-      try {
-        const r = checkOutBooking(room.id, bid);
-        showToast(`${r.guestName} 已退房，房费 ¥${r.total.toLocaleString()}`);
-        closeModal();
-        renderAll();
-      } catch (e) {
-        showToast(e.message, 'error');
+      const booking = allBookings.find(b => b.id === bid);
+      if (!booking) return;
+      if (booking.status === BookingStatus.CHECKED_IN) {
+        if (!confirm(`确认 ${booking.guestName} 退房结账？`)) return;
+        try {
+          const r = checkOutBooking(room.id, bid);
+          showToast(`${r.guestName} 已退房，房费 ¥${r.total.toLocaleString()}`);
+          closeModal();
+          renderAll();
+        } catch (e) {
+          showToast(e.message, 'error');
+        }
+      } else {
+        if (!confirm(`确认取消 ${booking.guestName} 的预订？\n该操作将释放占用的房间库存，不计入今日结账。`)) return;
+        try {
+          const r = cancelBooking(room.id, bid, '房间详情撤单');
+          showToast(`预订已取消`);
+          closeModal();
+          renderAll();
+        } catch (e) {
+          showToast(e.message, 'error');
+        }
       }
     });
   });
@@ -431,8 +446,8 @@ function renderBookingList(containerId, bookings, type) {
   container.innerHTML = bookings.map(b => {
     const typeLabel = RoomTypeLabels[b.roomType] || b.roomType;
     const priceTag = b.priceSource === PriceSource.MANUAL
-      ? `<span class="tag tag-manual">手动价 ¥${b.rate}</span>`
-      : `<span class="tag tag-dynamic">动态价 ¥${b.rate}</span>`;
+      ? `<span class="tag tag-manual">手动价 ¥${b.dailyRate}</span>`
+      : `<span class="tag tag-dynamic">动态价 ¥${b.dailyRate}</span>`;
     const teamTag = b.teamName ? `<span class="tag tag-team">${b.teamName}</span>` : '';
     const overbookTag = b.isOverbook ? `<span class="tag tag-overbook">超订</span>` : '';
 
@@ -545,7 +560,7 @@ function openCheckinModal(roomId, bookingId) {
         <div class="price-mode-switch">
           <label class="radio-label">
             <input type="radio" name="ci-price-mode" value="dynamic" ${booking.priceSource !== PriceSource.MANUAL ? 'checked' : ''} />
-            动态定价 (¥${booking.rate}/晚)
+            动态定价 (¥${booking.dailyRate}/晚)
           </label>
           <label class="radio-label">
             <input type="radio" name="ci-price-mode" value="manual" ${booking.priceSource === PriceSource.MANUAL ? 'checked' : ''} />
@@ -555,7 +570,7 @@ function openCheckinModal(roomId, bookingId) {
       </div>
       <div class="form-group" id="ci-manual-rate-group" style="${booking.priceSource !== PriceSource.MANUAL ? 'display:none;' : ''}">
         <label>手动房价 (元/晚)</label>
-        <input type="number" id="ci-manual-rate" class="input" min="0" step="1" value="${booking.priceSource === PriceSource.MANUAL ? booking.rate : ''}" placeholder="请输入手动房价" />
+        <input type="number" id="ci-manual-rate" class="input" min="0" step="1" value="${booking.priceSource === PriceSource.MANUAL ? booking.dailyRate : ''}" placeholder="请输入手动房价" />
       </div>
       <div class="price-banner" id="ci-price-banner">
         总计：¥<span id="ci-total">${booking.totalPrice}</span>
@@ -640,7 +655,7 @@ function openExtendModal(roomId, bookingId) {
   const updateExtPrice = () => {
     const nights = parseInt(document.getElementById('ext-nights').value, 10) || 0;
     if (nights > 0) {
-      document.getElementById('ext-total').textContent = (booking.rate * nights).toFixed(0);
+      document.getElementById('ext-total').textContent = (booking.dailyRate * nights).toFixed(0);
     }
   };
   updateExtPrice();
@@ -835,8 +850,20 @@ function renderTeamsPage() {
 
   const pendingCount = teams.filter(t => t.status === TeamStatus.PENDING).length;
   const activeCount = teams.filter(t => t.status === TeamStatus.ALLOCATED || t.status === TeamStatus.PARTIAL).length;
-  const cancelledCount = teams.filter(t => t.status === TeamStatus.CANCELLED).length;
-  const totalRooms = teams.reduce((sum, t) => sum + (t.totalRooms || 0), 0);
+
+  let totalRoomNights = 0;
+  let totalRevenueAll = 0;
+  teams.forEach(t => {
+    const bookings = getTeamBookings(t.id).filter(b => b.status !== BookingStatus.CANCELLED);
+    const cancelledBookings = getTeamBookings(t.id).filter(b => b.status === BookingStatus.CANCELLED);
+    t._bookings = bookings;
+    t._cancelledBookings = cancelledBookings;
+    t._roomNights = bookings.reduce((s, b) => s + (b.nights || 0), 0);
+    t._revenue = bookings.reduce((s, b) => s + (b.totalPrice || 0), 0);
+    t._cancelledRevenue = cancelledBookings.reduce((s, b) => s + (b.totalPrice || 0), 0);
+    totalRoomNights += t._roomNights;
+    totalRevenueAll += t._revenue;
+  });
 
   statsEl.innerHTML = `
     <div class="stat-item">
@@ -852,7 +879,7 @@ function renderTeamsPage() {
       <div class="stat-label">进行中</div>
     </div>
     <div class="stat-item">
-      <div class="stat-value">${totalRooms}</div>
+      <div class="stat-value">${totalRoomNights}</div>
       <div class="stat-label">总房间夜</div>
     </div>
   `;
@@ -864,23 +891,39 @@ function renderTeamsPage() {
 
   container.innerHTML = teams.map(t => {
     const statusMap = {
-      [TeamStatus.PENDING]: { label: '待分房', cls: 'tag-pending' },
+      [TeamStatus.PENDING]: { label: '待分房', cls: 'tag-warning' },
       [TeamStatus.ALLOCATED]: { label: '已分房', cls: 'tag-success' },
-      [TeamStatus.PARTIAL]: { label: '部分完成', cls: 'tag-warning' },
-      [TeamStatus.CANCELLED]: { label: '已取消', cls: 'tag-cancelled' }
+      [TeamStatus.PARTIAL]: { label: '部分取消', cls: 'tag-warning' },
+      [TeamStatus.CANCELLED]: { label: '已取消', cls: 'tag-danger' }
     };
     const status = statusMap[t.status] || { label: t.status, cls: '' };
 
     const roomsByType = {};
-    (t.bookings || []).forEach(b => {
-      if (!roomsByType[b.roomType]) roomsByType[b.roomType] = { count: 0, nights: 0 };
+    (t._bookings || []).forEach(b => {
+      if (!roomsByType[b.roomType]) roomsByType[b.roomType] = { count: 0, nights: 0, revenue: 0 };
       roomsByType[b.roomType].count++;
       roomsByType[b.roomType].nights += b.nights;
+      roomsByType[b.roomType].revenue += b.totalPrice;
     });
 
-    const typeSummary = Object.entries(roomsByType).map(([type, info]) =>
-      `${RoomTypeLabels[type] || type} ${info.count}间×${info.nights}晚`
-    ).join('，');
+    let typeSummary;
+    if (t.status === TeamStatus.PENDING) {
+      const nights = t.nights;
+      typeSummary = `${RoomTypeLabels[t.roomType] || t.roomType} ${t.count}间×${nights}晚 (待分房)`;
+    } else {
+      const typeParts = Object.entries(roomsByType).map(([type, info]) =>
+        `${RoomTypeLabels[type] || type} ${info.count}间×${info.nights}晚`
+      );
+      if ((t.cancelledCount || 0) > 0) {
+        typeParts.push(`已取消 ${t.cancelledCount}间`);
+      }
+      typeSummary = typeParts.join('，') || '暂无房型信息';
+    }
+
+    const totalRevenue = t._revenue || 0;
+    const priceTag = t.manualRate
+      ? `<span class="tag tag-manual">团价 ¥${t.manualRate}</span>`
+      : `<span class="tag tag-dynamic">动态价</span>`;
 
     let actions = '';
     if (t.status === TeamStatus.PENDING) {
@@ -893,8 +936,11 @@ function renderTeamsPage() {
       actions = `
         <button class="btn btn-outline btn-sm" data-action="view" data-team="${t.id}">查看房间</button>
         <button class="btn btn-outline btn-sm" data-action="reschedule" data-team="${t.id}">改期</button>
+        <button class="btn btn-outline btn-sm btn-danger" data-action="cancel-team" data-team="${t.id}">取消未入住</button>
       `;
     }
+
+    const checkOutDate = t.checkOutDate || addDays(t.checkInDate, t.nights);
 
     return `
       <div class="team-card">
@@ -905,15 +951,16 @@ function renderTeamsPage() {
         <div class="team-card-body">
           <div class="team-info-row">
             <span>入住：${formatDate(t.checkInDate)}</span>
-            <span>离店：${formatDate(t.checkOutDate)}</span>
+            <span>离店：${formatDate(checkOutDate)}</span>
             <span>${t.nights}晚</span>
           </div>
           <div class="team-info-row">
-            <span class="text-muted">${typeSummary || '暂无房型信息'}</span>
+            <span class="text-muted">${typeSummary}</span>
           </div>
           <div class="team-info-row">
-            <span class="text-muted">总房费：¥${t.totalRevenue || 0}</span>
-            ${t.manualRate ? `<span class="tag tag-manual">团价</span>` : `<span class="tag tag-dynamic">动态价</span>`}
+            <span class="text-muted">总房费：¥${totalRevenue.toLocaleString()}</span>
+            ${priceTag}
+            ${t._cancelledRevenue ? `<span class="text-muted">已取消 ¥${t._cancelledRevenue.toLocaleString()}</span>` : ''}
           </div>
         </div>
         <div class="team-card-actions">
@@ -931,13 +978,13 @@ function handleTeamAction(action, teamId) {
 
   switch (action) {
     case 'allocate':
-      if (confirm(`确认给团队「${team.name}」分配房间？`)) {
+      if (confirm(`确认给团队「${team.name}」分配 ${team.count} 间 ${RoomTypeLabels[team.roomType] || team.roomType}？`)) {
         const result = allocateTeam(teamId);
         if (result.ok) {
-          showToast(`分房成功，分配 ${result.allocated} 间`);
+          showToast(`分房成功，分配 ${result.allocated || result.allocatedCount || result.success || 0} 间`);
           renderAll();
         } else {
-          showToast(result.error, 'error');
+          showToast((result.errors || [result.error || '分房失败']).join('；'), 'error');
         }
       }
       break;
@@ -946,13 +993,13 @@ function handleTeamAction(action, teamId) {
       break;
     case 'cancel-team':
     case 'cancel':
-      if (confirm(`确认取消整个团队「${team.name}」？所有相关预订将被取消。`)) {
-        const result = cancelTeamBooking(teamId, null, '团队取消');
+      if (confirm(`确认取消团队「${team.name}」的未入住预订？\n在住房间需先办理退房。`)) {
+        const result = cancelAllTeamBookings(teamId, '团队取消');
         if (result.ok) {
-          showToast('团队已取消');
+          showToast(`已取消 ${result.cancelledCount || 0} 间预订`);
           renderAll();
         } else {
-          showToast(result.error, 'error');
+          showToast(result.error || '取消失败', 'error');
         }
       }
       break;
@@ -1013,38 +1060,97 @@ function openRescheduleModal(teamId) {
 }
 
 function openTeamDetailModal(teamId) {
-  const bookings = getTeamBookings(teamId);
+  const allBookings = getTeamBookings(teamId);
+  const activeBookings = allBookings.filter(b => b.status !== BookingStatus.CANCELLED);
+  const cancelledBookings = allBookings.filter(b => b.status === BookingStatus.CANCELLED);
   const teams = getTeams();
   const team = teams.find(t => t.id === teamId);
   if (!team) return;
+
+  const totalNights = activeBookings.reduce((s, b) => s + b.nights, 0);
+  const totalRevenue = activeBookings.reduce((s, b) => s + b.totalPrice, 0);
+  const avgRate = totalNights > 0 ? Math.round(totalRevenue / totalNights) : 0;
+  const cancelledNights = cancelledBookings.reduce((s, b) => s + b.nights, 0);
+  const cancelledRevenue = cancelledBookings.reduce((s, b) => s + b.totalPrice, 0);
+
+  const roomsByType = {};
+  activeBookings.forEach(b => {
+    if (!roomsByType[b.roomType]) roomsByType[b.roomType] = { count: 0, nights: 0, revenue: 0 };
+    roomsByType[b.roomType].count++;
+    roomsByType[b.roomType].nights += b.nights;
+    roomsByType[b.roomType].revenue += b.totalPrice;
+  });
+
+  const checkOutDate = team.checkOutDate || addDays(team.checkInDate, team.nights);
 
   const html = `
     <div class="modal-body">
       <h3 class="modal-title">${team.name} - 房间明细</h3>
       <div class="team-detail-summary">
-        <span>共 ${bookings.length} 间</span>
-        <span>${formatDate(team.checkInDate)} → ${formatDate(team.checkOutDate)}</span>
-        <span>${team.nights}晚</span>
+        <div>
+          <div class="sum-label">入住日期</div>
+          <div class="sum-value">${formatDate(team.checkInDate)}</div>
+        </div>
+        <div>
+          <div class="sum-label">离店日期</div>
+          <div class="sum-value">${formatDate(checkOutDate)}</div>
+        </div>
+        <div>
+          <div class="sum-label">总夜数</div>
+          <div class="sum-value">${team.nights}晚</div>
+        </div>
+        <div>
+          <div class="sum-label">实际房夜</div>
+          <div class="sum-value">${totalNights}晚${cancelledNights ? ' <span class="text-muted">(-' + cancelledNights + '晚取消)</span>' : ''}</div>
+        </div>
+        <div>
+          <div class="sum-label">总房费</div>
+          <div class="sum-value sum-accent">¥${totalRevenue.toLocaleString()}${cancelledRevenue ? ' <span class="text-muted">(-¥' + cancelledRevenue.toLocaleString() + '取消)</span>' : ''}</div>
+        </div>
+        <div>
+          <div class="sum-label">均价ADR</div>
+          <div class="sum-value">¥${avgRate.toLocaleString()}</div>
+        </div>
       </div>
+
+      <div class="team-detail-typebreakdown">
+        <div class="breakdown-title">房型汇总</div>
+        <div class="type-row">
+          ${Object.entries(roomsByType).map(([type, info]) => `
+            <div class="type-item">
+              <span class="type-label">${RoomTypeLabels[type] || type}</span>
+              <span class="type-detail">${info.count}间 × ${info.nights}晚</span>
+              <span class="type-value">¥${info.revenue.toLocaleString()}</span>
+            </div>
+          `).join('') || '<span class="text-muted">暂无房型数据（待分房）</span>'}
+        </div>
+      </div>
+
+      <div class="section-title">房间明细（${activeBookings.length}间${cancelledBookings.length ? ' · 已取消' + cancelledBookings.length + '间' : ''}）</div>
       <div class="team-booking-list">
-        ${bookings.length === 0
-          ? '<div class="empty-state">暂无房间记录</div>'
-          : bookings.map(b => {
+        ${allBookings.length === 0
+          ? '<div class="empty-state">暂无房间记录，请先执行一键分房</div>'
+          : allBookings
+            .sort((a, b) => a.checkInDate.localeCompare(b.checkInDate) || a.roomNumber - b.roomNumber)
+            .map(b => {
               const statusMap = {
-                [BookingStatus.RESERVED]: '已预订',
-                [BookingStatus.CHECKED_IN]: '在住',
-                [BookingStatus.CHECKED_OUT]: '已离店',
-                [BookingStatus.CANCELLED]: '已取消'
+                [BookingStatus.RESERVED]: { label: '已预订', tag: 'tag-warning' },
+                [BookingStatus.CHECKED_IN]: { label: '客人在住', tag: 'tag-success' },
+                [BookingStatus.CHECKED_OUT]: { label: '已离店', tag: 'tag-manual' },
+                [BookingStatus.CANCELLED]: { label: '已取消', tag: 'tag-danger' }
               };
+              const st = statusMap[b.status] || { label: b.status, tag: '' };
               const statusCls = b.status === BookingStatus.CANCELLED ? 'cancelled' : '';
               const canCancel = b.status === BookingStatus.RESERVED;
               return `
                 <div class="team-booking-item ${statusCls}">
                   <div class="tbi-room">${b.roomNumber}房 · ${RoomTypeLabels[b.roomType] || b.roomType}</div>
                   <div class="tbi-info">
-                    <span>${statusMap[b.status] || b.status}</span>
-                    <span>¥${b.rate}/晚</span>
-                    <span>共¥${b.totalPrice}</span>
+                    <span>${formatDate(b.checkInDate)}→${formatDate(b.checkOutDate)}</span>
+                    <span>${b.nights}晚</span>
+                    <span class="tag ${st.tag}">${st.label}</span>
+                    <span>¥${b.dailyRate}/晚</span>
+                    <span><strong>共¥${b.totalPrice.toLocaleString()}</strong></span>
                   </div>
                   ${canCancel ? `<button class="btn btn-outline btn-sm btn-danger" data-action="cancel-booking" data-team="${teamId}" data-booking="${b.id}" data-room="${b.roomId}">取消</button>` : ''}
                 </div>
@@ -1064,7 +1170,7 @@ function openTeamDetailModal(teamId) {
       const tid = e.target.dataset.team;
       const bid = e.target.dataset.booking;
       const rid = e.target.dataset.room;
-      if (confirm('确认取消该房间预订？')) {
+      if (confirm('确认取消该房间预订？\n该操作将释放对应日期的房间库存。')) {
         const result = cancelTeamBooking(tid, bid, '团队单房取消');
         if (result.ok) {
           showToast('预订已取消');
@@ -1081,11 +1187,84 @@ function openTeamDetailModal(teamId) {
 function renderReportsPage() {
   renderTrendChart(document.getElementById('trend-chart'), getTrendData(30));
   renderHeatmap(document.getElementById('heatmap-chart'), getBookingHeatmap(7));
+  renderRevenueBreakdownCards();
   renderRevenueLedgerTable();
+}
+
+function renderRevenueBreakdownCards() {
+  const breakdown = getRevenueBreakdown(7);
+  const agg = breakdown.aggregate;
+  const container = document.getElementById('revenue-cards');
+  if (!container) return;
+
+  const totalWalkIn = agg.walkInNights > 0 ? Math.round(agg.walkInRevenue / agg.walkInNights) : 0;
+  const totalTeam = agg.teamNights > 0 ? Math.round(agg.teamRevenue / agg.teamNights) : 0;
+  const totalManual = agg.manualNights > 0 ? Math.round(agg.manualRevenue / agg.manualNights) : 0;
+  const totalDynamic = agg.dynamicNights > 0 ? Math.round(agg.dynamicRevenue / agg.dynamicNights) : 0;
+  const totalNights = agg.walkInNights + agg.teamNights;
+  const totalRevenueAll = agg.walkInRevenue + agg.teamRevenue;
+
+  function pct(val, total) {
+    if (!total) return '0%';
+    return Math.round(100 * val / total) + '%';
+  }
+
+  container.innerHTML = `
+    <div class="revenue-breakdown-grid">
+      <div class="breakdown-card">
+        <div class="breakdown-title">按客源分布（7日）</div>
+        <div class="breakdown-row">
+          <span class="breakdown-label">散客</span>
+          <span class="breakdown-bar"><span class="bar bar-walkin" style="width:${pct(agg.walkInRevenue, totalRevenueAll)}"></span></span>
+          <span class="breakdown-value">¥${agg.walkInRevenue.toLocaleString()}<small>${agg.walkInNights}晚</small></span>
+        </div>
+        <div class="breakdown-row">
+          <span class="breakdown-label">团队</span>
+          <span class="breakdown-bar"><span class="bar bar-team" style="width:${pct(agg.teamRevenue, totalRevenueAll)}"></span></span>
+          <span class="breakdown-value">¥${agg.teamRevenue.toLocaleString()}<small>${agg.teamNights}晚</small></span>
+        </div>
+        <div class="breakdown-subrow">
+          <span>散客ADR ¥${totalWalkIn} · 团队ADR ¥${totalTeam}</span>
+          <span>占比 ${pct(agg.walkInRevenue, totalRevenueAll)} / ${pct(agg.teamRevenue, totalRevenueAll)}</span>
+        </div>
+      </div>
+
+      <div class="breakdown-card">
+        <div class="breakdown-title">按价格来源（7日）</div>
+        <div class="breakdown-row">
+          <span class="breakdown-label">动态价</span>
+          <span class="breakdown-bar"><span class="bar bar-dynamic" style="width:${pct(agg.dynamicRevenue, totalRevenueAll)}"></span></span>
+          <span class="breakdown-value">¥${agg.dynamicRevenue.toLocaleString()}<small>${agg.dynamicNights}晚</small></span>
+        </div>
+        <div class="breakdown-row">
+          <span class="breakdown-label">手动价</span>
+          <span class="breakdown-bar"><span class="bar bar-manual" style="width:${pct(agg.manualRevenue, totalRevenueAll)}"></span></span>
+          <span class="breakdown-value">¥${agg.manualRevenue.toLocaleString()}<small>${agg.manualNights}晚</small></span>
+        </div>
+        <div class="breakdown-subrow">
+          <span>动态价ADR ¥${totalDynamic} · 手动价ADR ¥${totalManual}</span>
+          <span>占比 ${pct(agg.dynamicRevenue, totalRevenueAll)} / ${pct(agg.manualRevenue, totalRevenueAll)}</span>
+        </div>
+      </div>
+
+      <div class="breakdown-card">
+        <div class="breakdown-title">7日汇总</div>
+        <div class="breakdown-summary-grid">
+          <div><span class="sum-label">总房夜</span><span class="sum-value">${totalNights}晚</span></div>
+          <div><span class="sum-label">总流水</span><span class="sum-value sum-accent">¥${totalRevenueAll.toLocaleString()}</span></div>
+          <div><span class="sum-label">已入账</span><span class="sum-value text-success">¥${agg.totalRecognized.toLocaleString()}</span></div>
+          <div><span class="sum-label">待入账</span><span class="sum-value text-warning">¥${agg.totalPending.toLocaleString()}</span></div>
+          <div><span class="sum-label">已取消</span><span class="sum-value text-muted">¥${agg.totalCancelled.toLocaleString()}</span></div>
+          <div><span class="sum-label">综合ADR</span><span class="sum-value">¥${totalNights ? Math.round(totalRevenueAll/totalNights) : 0}</span></div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderRevenueLedgerTable() {
   const breakdown = getRevenueBreakdown(7);
+  const days = breakdown.days;
   const container = document.getElementById('ledger-table');
   if (!container) return;
 
@@ -1094,13 +1273,17 @@ function renderRevenueLedgerTable() {
   let totalCancelled = 0;
   let totalDynamic = 0;
   let totalManual = 0;
+  let totalWalkIn = 0;
+  let totalTeam = 0;
 
-  const rows = breakdown.map(d => {
+  const rows = days.map(d => {
     totalRecognized += d.recognized;
     totalPending += d.pending;
     totalCancelled += d.cancelled;
     totalDynamic += d.bySource?.dynamic || 0;
     totalManual += d.bySource?.manual || 0;
+    totalWalkIn += d.byCustomer?.walkIn || 0;
+    totalTeam += d.byCustomer?.team || 0;
 
     const isToday = d.date === getToday();
     const rowCls = isToday ? 'ledger-row-today' : '';
@@ -1112,10 +1295,11 @@ function renderRevenueLedgerTable() {
         <td class="text-right text-success">¥${d.recognized.toLocaleString()}</td>
         <td class="text-right">${d.pendingCount}间</td>
         <td class="text-right text-warning">¥${d.pending.toLocaleString()}</td>
-        <td class="text-right">${d.cancelledCount}间</td>
-        <td class="text-right text-muted">¥${d.cancelled.toLocaleString()}</td>
+        <td class="text-right">¥${(d.byCustomer?.walkIn || 0).toLocaleString()}</td>
+        <td class="text-right">¥${(d.byCustomer?.team || 0).toLocaleString()}</td>
         <td class="text-right">¥${(d.bySource?.dynamic || 0).toLocaleString()}</td>
         <td class="text-right">¥${(d.bySource?.manual || 0).toLocaleString()}</td>
+        <td class="text-right text-muted">¥${d.cancelled.toLocaleString()}</td>
       </tr>
     `;
   }).join('');
@@ -1125,14 +1309,15 @@ function renderRevenueLedgerTable() {
       <thead>
         <tr>
           <th>营业日</th>
-          <th class="text-right">已入账间数</th>
-          <th class="text-right">已入账金额</th>
-          <th class="text-right">待入账间数</th>
-          <th class="text-right">待入账金额</th>
-          <th class="text-right">已取消间数</th>
-          <th class="text-right">已取消金额</th>
-          <th class="text-right">动态定价</th>
-          <th class="text-right">手动房价</th>
+          <th class="text-right">已入账间</th>
+          <th class="text-right">已入账</th>
+          <th class="text-right">待入账间</th>
+          <th class="text-right">待入账</th>
+          <th class="text-right">散客房费</th>
+          <th class="text-right">团队房费</th>
+          <th class="text-right">动态价</th>
+          <th class="text-right">手动价</th>
+          <th class="text-right">取消金额</th>
         </tr>
       </thead>
       <tbody>
@@ -1141,14 +1326,15 @@ function renderRevenueLedgerTable() {
       <tfoot>
         <tr>
           <td><strong>7日合计</strong></td>
-          <td class="text-right"><strong>${breakdown.reduce((s, d) => s + d.recognizedCount, 0)}间</strong></td>
+          <td class="text-right"><strong>${days.reduce((s, d) => s + d.recognizedCount, 0)}间</strong></td>
           <td class="text-right"><strong class="text-success">¥${totalRecognized.toLocaleString()}</strong></td>
-          <td class="text-right"><strong>${breakdown.reduce((s, d) => s + d.pendingCount, 0)}间</strong></td>
+          <td class="text-right"><strong>${days.reduce((s, d) => s + d.pendingCount, 0)}间</strong></td>
           <td class="text-right"><strong class="text-warning">¥${totalPending.toLocaleString()}</strong></td>
-          <td class="text-right"><strong>${breakdown.reduce((s, d) => s + d.cancelledCount, 0)}间</strong></td>
-          <td class="text-right"><strong class="text-muted">¥${totalCancelled.toLocaleString()}</strong></td>
+          <td class="text-right"><strong>¥${totalWalkIn.toLocaleString()}</strong></td>
+          <td class="text-right"><strong>¥${totalTeam.toLocaleString()}</strong></td>
           <td class="text-right"><strong>¥${totalDynamic.toLocaleString()}</strong></td>
           <td class="text-right"><strong>¥${totalManual.toLocaleString()}</strong></td>
+          <td class="text-right"><strong class="text-muted">¥${totalCancelled.toLocaleString()}</strong></td>
         </tr>
       </tfoot>
     </table>

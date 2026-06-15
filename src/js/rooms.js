@@ -312,7 +312,7 @@ function checkOutBooking(roomId, bookingId) {
   booking.status = BookingStatus.CHECKED_OUT;
   booking.checkOutActualDate = today;
   saveRooms(rooms);
-  return { guestName: savedGuest, total: savedTotal, roomId, bookingId };
+  return { ok: true, guestName: savedGuest, revenue: savedTotal, total: savedTotal, roomId, bookingId };
 }
 
 function getActiveBookingsForRoom(room) {
@@ -589,18 +589,25 @@ function getRevenueLedger(dateStr) {
       checkedOutRevenue: 0,
       cancelledRevenue: 0,
       manualRevenue: 0,
-      dynamicRevenue: 0
+      dynamicRevenue: 0,
+      walkInRevenue: 0,
+      teamRevenue: 0,
+      walkInNights: 0,
+      teamNights: 0,
+      manualNights: 0,
+      dynamicNights: 0
     }
   };
   rooms.forEach(room => {
     (room.bookings || []).forEach(b => {
       const coversDate = dateStr >= b.checkInDate && dateStr < b.checkOutDate;
-      if (!coversDate && b.status !== BookingStatus.CHECKED_OUT) return;
+      if (!coversDate && b.status !== BookingStatus.CHECKED_OUT && b.status !== BookingStatus.CANCELLED) return;
       let nightRate = 0;
       if (coversDate) {
         const dayEntry = b.dailyBreakdown?.find(d => d.date === dateStr);
         nightRate = dayEntry ? dayEntry.rate : b.dailyRate;
       }
+      const isTeam = !!(b.teamId || b.teamName);
       const entry = {
         bookingId: b.id,
         roomId: room.id,
@@ -612,23 +619,30 @@ function getRevenueLedger(dateStr) {
         priceSource: b.priceSource,
         teamId: b.teamId,
         teamName: b.teamName,
+        isTeam,
         status: b.status
       };
       if (b.status === BookingStatus.CHECKED_IN && coversDate) {
         ledger.checkedIn.push(entry);
         ledger.totals.checkedInRevenue += nightRate;
-        if (b.priceSource === PriceSource.MANUAL) ledger.totals.manualRevenue += nightRate;
-        else ledger.totals.dynamicRevenue += nightRate;
+        if (b.priceSource === PriceSource.MANUAL) { ledger.totals.manualRevenue += nightRate; ledger.totals.manualNights++; }
+        else { ledger.totals.dynamicRevenue += nightRate; ledger.totals.dynamicNights++; }
+        if (isTeam) { ledger.totals.teamRevenue += nightRate; ledger.totals.teamNights++; }
+        else { ledger.totals.walkInRevenue += nightRate; ledger.totals.walkInNights++; }
       } else if (b.status === BookingStatus.RESERVED && coversDate) {
         ledger.reserved.push(entry);
         ledger.totals.reservedRevenue += nightRate;
-        if (b.priceSource === PriceSource.MANUAL) ledger.totals.manualRevenue += nightRate;
-        else ledger.totals.dynamicRevenue += nightRate;
+        if (b.priceSource === PriceSource.MANUAL) { ledger.totals.manualRevenue += nightRate; ledger.totals.manualNights++; }
+        else { ledger.totals.dynamicRevenue += nightRate; ledger.totals.dynamicNights++; }
+        if (isTeam) { ledger.totals.teamRevenue += nightRate; ledger.totals.teamNights++; }
+        else { ledger.totals.walkInRevenue += nightRate; ledger.totals.walkInNights++; }
       } else if (b.status === BookingStatus.CHECKED_OUT && b.checkOutActualDate === dateStr) {
         ledger.checkedOut.push({ ...entry, totalAmount: b.totalPrice });
         ledger.totals.checkedOutRevenue += b.totalPrice;
         if (b.priceSource === PriceSource.MANUAL) ledger.totals.manualRevenue += b.totalPrice;
         else ledger.totals.dynamicRevenue += b.totalPrice;
+        if (isTeam) ledger.totals.teamRevenue += b.totalPrice;
+        else ledger.totals.walkInRevenue += b.totalPrice;
       } else if (b.status === BookingStatus.CANCELLED && b.cancelledAt === dateStr) {
         ledger.cancelled.push({ ...entry, reason: b.cancellationReason });
         ledger.totals.cancelledRevenue += b.totalPrice;
@@ -671,16 +685,20 @@ function allocateTeam(teamId) {
     team.status = TeamStatus.PARTIAL;
   }
   saveTeams(teams);
-  return { ok: true, allocatedCount: bookingIds.length, bookingIds, errors: [] };
+  return { ok: true, success: bookingIds.length, allocated: bookingIds.length, allocatedCount: bookingIds.length, bookingIds, errors: [] };
 }
 
-function rescheduleTeam(teamId, newCheckInDate) {
+function rescheduleTeam(teamId, newCheckInDate, newNights = null) {
   const teams = getTeams();
   const team = teams.find(t => t.id === teamId);
   if (!team) throw new Error('团队不存在');
   if (team.status === TeamStatus.CANCELLED) throw new Error('团队已取消');
+  const finalNights = newNights || team.nights;
+  const newCheckOutDate = addDays(newCheckInDate, finalNights);
   if (!team.bookingIds || team.bookingIds.length === 0) {
     team.checkInDate = newCheckInDate;
+    team.checkOutDate = newCheckOutDate;
+    team.nights = finalNights;
     saveTeams(teams);
     return { ok: true, movedCount: 0 };
   }
@@ -704,7 +722,7 @@ function rescheduleTeam(teamId, newCheckInDate) {
     const newBookings = [];
     for (let i = 0; i < oldBookings.length; i++) {
       const oldBk = oldBookings[i].booking;
-      let room = findAvailableRoom(team.roomType, newCheckInDate, team.nights);
+      let room = findAvailableRoom(team.roomType, newCheckInDate, finalNights);
       if (!room) {
         const typedRooms = getRoomsByType(team.roomType);
         room = typedRooms[0];
@@ -713,7 +731,7 @@ function rescheduleTeam(teamId, newCheckInDate) {
       const r = reserveRoom(room.id, {
         guestName: oldBk.guestName,
         checkInDate: newCheckInDate,
-        nights: team.nights,
+        nights: finalNights,
         manualRate: oldBk.dailyRate,
         teamId: team.id,
         teamName: team.name
@@ -721,13 +739,55 @@ function rescheduleTeam(teamId, newCheckInDate) {
       newBookings.push(r.booking);
     }
     team.checkInDate = newCheckInDate;
+    team.checkOutDate = newCheckOutDate;
+    team.nights = finalNights;
     team.bookingIds = newBookings.map(b => b.id);
     saveTeams(teams);
-    return { ok: true, movedCount: newBookings.length, newCheckInDate };
+    return { ok: true, movedCount: newBookings.length, newCheckInDate, newCheckOutDate };
   } catch (e) {
     saveRooms(roomsSnapshot);
     return { ok: false, error: e.message, movedCount: 0 };
   }
+}
+
+function cancelAllTeamBookings(teamId, reason = '团队取消') {
+  const teams = getTeams();
+  const team = teams.find(t => t.id === teamId);
+  if (!team) throw new Error('团队不存在');
+  if (team.status === TeamStatus.CANCELLED) throw new Error('团队已取消');
+  const rooms = getRooms();
+  let cancelledCount = 0;
+  const bookingIdsToCancel = [...(team.bookingIds || [])];
+  bookingIdsToCancel.forEach(bid => {
+    rooms.forEach(room => {
+      const b = (room.bookings || []).find(x => x.id === bid);
+      if (b && b.status !== BookingStatus.CHECKED_OUT && b.status !== BookingStatus.CANCELLED) {
+        if (b.status === BookingStatus.CHECKED_IN) {
+          return;
+        }
+        b.status = BookingStatus.CANCELLED;
+        b.cancelledAt = getToday();
+        b.cancellationReason = reason;
+        team.cancelledCount = (team.cancelledCount || 0) + 1;
+        team.bookingIds = (team.bookingIds || []).filter(id => id !== bid);
+        cancelledCount++;
+      }
+    });
+  });
+  if (cancelledCount > 0 || team.status !== TeamStatus.PENDING) {
+    team.allocatedCount = Math.max(0, (team.allocatedCount || 0) - cancelledCount);
+    if ((team.cancelledCount || 0) >= team.count) {
+      team.status = TeamStatus.CANCELLED;
+    } else if ((team.allocatedCount || 0) === 0 && team.cancelledCount > 0) {
+      team.status = TeamStatus.CANCELLED;
+    }
+  }
+  if (team.status === TeamStatus.PENDING) {
+    team.status = TeamStatus.CANCELLED;
+  }
+  saveRooms(rooms);
+  saveTeams(teams);
+  return { ok: true, cancelledCount, teamId };
 }
 
 function cancelTeamBooking(teamId, bookingId, reason = '') {
@@ -801,6 +861,7 @@ export {
   allocateTeam,
   rescheduleTeam,
   cancelTeamBooking,
+  cancelAllTeamBookings,
   getTeamBookings,
   countDatesInRange
 };
