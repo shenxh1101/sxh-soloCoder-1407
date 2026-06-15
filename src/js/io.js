@@ -12,10 +12,9 @@ import {
   createDefaultPricing,
   addDays,
   getTeams,
-  saveTeams
+  saveTeams,
+  createTeam
 } from './state.js';
-
-import { bulkBookTransactional, canAcceptBooking } from './rooms.js';
 
 const RoomTypeMap = {
   '标准单人间': RoomTypes.SINGLE,
@@ -129,18 +128,12 @@ function parseTeamBookings(text) {
       errors.push(`第${idx + 2}行: 无效的房价`);
       return;
     }
-    const check = canAcceptBooking(roomType, checkInDate, nights);
-    if (!check.ok) {
-      errors.push(`第${idx + 2}行: ${typeRaw} 在 ${check.date} 已达超订上限（${check.used}/${check.allowed}），无法预订 ${count} 间`);
-      return;
-    }
     bookings.push({ teamName, roomType, count, checkInDate, nights, manualRate });
   });
   return { bookings, errors };
 }
 
 function importTeamCSV(file, options = {}) {
-  const { asTeam = false, teamName = '' } = options;
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -150,12 +143,22 @@ function importTeamCSV(file, options = {}) {
           reject(new Error(errors.join('\n')));
           return;
         }
-        const result = bulkBookTransactional(bookings);
-        if (!result.ok) {
-          reject(new Error(result.errors.join('\n')));
-          return;
-        }
-        resolve(result.results);
+        const teams = getTeams();
+        const newTeams = [];
+        bookings.forEach(row => {
+          const team = createTeam({
+            name: row.teamName,
+            roomType: row.roomType,
+            checkInDate: row.checkInDate,
+            nights: row.nights,
+            count: row.count,
+            manualRate: row.manualRate
+          });
+          teams.push(team);
+          newTeams.push(team);
+        });
+        saveTeams(teams);
+        resolve(newTeams);
       } catch (err) {
         reject(err);
       }

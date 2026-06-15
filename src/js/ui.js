@@ -542,7 +542,7 @@ function openCheckinModal(roomId, bookingId) {
 
   const html = `
     <div class="modal-body">
-      <h3 class="modal-title">办理入住 - ${room.roomNumber}房</h3>
+      <h3 class="modal-title">办理入住 - ${room.id}</h3>
       <div class="form-group">
         <label>客人姓名</label>
         <input type="text" id="ci-guest" class="input" value="${booking.guestName || ''}" placeholder="请输入客人姓名" />
@@ -615,7 +615,7 @@ function openCheckinModal(roomId, bookingId) {
 
     const result = checkInRoom(roomId, { guestName, bookingId, manualRate });
     if (result.ok) {
-      showToast(`${room.roomNumber}房 入住成功`);
+      showToast(`${room.id} 入住成功`);
       closeModal();
       renderAll();
     } else {
@@ -632,7 +632,7 @@ function openExtendModal(roomId, bookingId) {
 
   const html = `
     <div class="modal-body">
-      <h3 class="modal-title">延住 - ${room.roomNumber}房</h3>
+      <h3 class="modal-title">延住 - ${room.id}</h3>
       <div class="form-group">
         <label>当前离店日期</label>
         <input type="date" class="input" value="${booking.checkOutDate}" readonly />
@@ -691,7 +691,7 @@ function openChangeRoomModal(fromRoomId, bookingId, roomType) {
 
   const html = `
     <div class="modal-body">
-      <h3 class="modal-title">换房 - 从${fromRoom.roomNumber}房</h3>
+      <h3 class="modal-title">换房 - 从${fromRoom.id}</h3>
       <div class="form-group">
         <label>选择目标房间（${RoomTypeLabels[roomType]}）</label>
         <div class="room-select-list">
@@ -700,8 +700,8 @@ function openChangeRoomModal(fromRoomId, bookingId, roomType) {
             : availableRooms.map(r => `
               <label class="room-select-item">
                 <input type="radio" name="change-to" value="${r.id}" />
-                <span class="room-select-number">${r.roomNumber}房</span>
-                <span class="room-select-status">${r.status === 'available' ? '空闲' : '有预订'}</span>
+                <span class="room-select-number">${r.id}</span>
+                <span class="room-select-status">空闲可换</span>
               </label>
             `).join('')
           }
@@ -853,6 +853,7 @@ function renderTeamsPage() {
 
   let totalRoomNights = 0;
   let totalRevenueAll = 0;
+  const pricing = getPricing();
   teams.forEach(t => {
     const bookings = getTeamBookings(t.id).filter(b => b.status !== BookingStatus.CANCELLED);
     const cancelledBookings = getTeamBookings(t.id).filter(b => b.status === BookingStatus.CANCELLED);
@@ -861,8 +862,16 @@ function renderTeamsPage() {
     t._roomNights = bookings.reduce((s, b) => s + (b.nights || 0), 0);
     t._revenue = bookings.reduce((s, b) => s + (b.totalPrice || 0), 0);
     t._cancelledRevenue = cancelledBookings.reduce((s, b) => s + (b.totalPrice || 0), 0);
-    totalRoomNights += t._roomNights;
-    totalRevenueAll += t._revenue;
+    if (t.status === TeamStatus.PENDING) {
+      const perNight = t.manualRate || (pricing.basePrices[t.roomType] || 0);
+      t._pendingRoomNights = t.count * t.nights;
+      t._pendingRevenue = perNight * t.count * t.nights;
+    } else {
+      t._pendingRoomNights = 0;
+      t._pendingRevenue = 0;
+    }
+    totalRoomNights += t._roomNights + t._pendingRoomNights;
+    totalRevenueAll += t._revenue + t._pendingRevenue;
   });
 
   statsEl.innerHTML = `
@@ -920,10 +929,11 @@ function renderTeamsPage() {
       typeSummary = typeParts.join('，') || '暂无房型信息';
     }
 
-    const totalRevenue = t._revenue || 0;
+    const totalRevenue = t.status === TeamStatus.PENDING ? (t._pendingRevenue || 0) : (t._revenue || 0);
     const priceTag = t.manualRate
       ? `<span class="tag tag-manual">团价 ¥${t.manualRate}</span>`
       : `<span class="tag tag-dynamic">动态价</span>`;
+    const pendingTag = t.status === TeamStatus.PENDING ? `<span class="tag tag-warning">预估</span>` : '';
 
     let actions = '';
     if (t.status === TeamStatus.PENDING) {
@@ -959,6 +969,7 @@ function renderTeamsPage() {
           </div>
           <div class="team-info-row">
             <span class="text-muted">总房费：¥${totalRevenue.toLocaleString()}</span>
+            ${pendingTag}
             ${priceTag}
             ${t._cancelledRevenue ? `<span class="text-muted">已取消 ¥${t._cancelledRevenue.toLocaleString()}</span>` : ''}
           </div>
@@ -1399,9 +1410,10 @@ function bindEvents() {
     if (!file) return;
     try {
       const results = await importTeamCSV(file);
+      const totalRooms = results.reduce((s, t) => s + t.count, 0);
       resultEl.className = 'import-result success';
-      resultEl.textContent = `成功导入 ${results.length} 条团队预订记录（按日期自动分配房间）`;
-      showToast(`团队预订导入成功（${results.length}间）`);
+      resultEl.textContent = `成功导入 ${results.length} 个团队（共 ${totalRooms} 间）进入待分房池，请前往团队管理执行一键分房`;
+      showToast(`团队导入成功（${results.length}个团队）`);
       renderAll();
     } catch (err) {
       resultEl.className = 'import-result error';
