@@ -1,11 +1,14 @@
 import {
   RoomTypes,
   BookingStatus,
+  PriceSource,
   getRooms,
   getRevenueHistory,
   getToday,
   addDays
 } from './state.js';
+
+import { getRevenueLedger } from './rooms.js';
 
 const TOTAL_ROOMS = 40;
 const ROOMS_PER_TYPE = 10;
@@ -89,8 +92,42 @@ function getBookingHeatmap(days = 7) {
   return heatmap;
 }
 
+function getRevenueBreakdown(days = 7) {
+  const today = getToday();
+  const result = [];
+  for (let i = 0; i < days; i++) {
+    const date = addDays(today, i);
+    const ledger = getRevenueLedger(date);
+    const recognized = ledger.totals.checkedOutRevenue;
+    const recognizedCount = ledger.checkedOut.length;
+    const pending = ledger.totals.checkedInRevenue + ledger.totals.reservedRevenue;
+    const pendingCount = ledger.checkedIn.length + ledger.reserved.length;
+    const cancelled = ledger.totals.cancelledRevenue;
+    const cancelledCount = ledger.cancelled.length;
+
+    result.push({
+      date,
+      recognized,
+      recognizedCount,
+      pending,
+      pendingCount,
+      cancelled,
+      cancelledCount,
+      total: recognized + pending,
+      totalCount: recognizedCount + pendingCount,
+      bySource: {
+        dynamic: ledger.totals.dynamicRevenue,
+        manual: ledger.totals.manualRevenue
+      }
+    });
+  }
+  return result;
+}
+
 export {
   getTodayMetrics,
   getTrendData,
-  getBookingHeatmap
+  getBookingHeatmap,
+  getRevenueBreakdown,
+  getRevenueLedger
 };

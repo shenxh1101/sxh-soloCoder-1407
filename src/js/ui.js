@@ -9,7 +9,12 @@ import {
   getPricing,
   savePricing,
   subscribe,
-  BookingStatus
+  BookingStatus,
+  PriceSource,
+  TeamStatus,
+  getTeams,
+  createTeam,
+  updateTeam
 } from './state.js';
 
 import {
@@ -25,11 +30,23 @@ import {
   willBeOverbook,
   countBookingsOnDate,
   bulkBook,
-  findAvailableRoom
+  bulkBookTransactional,
+  findAvailableRoom,
+  cancelBooking,
+  extendBooking,
+  changeRoom,
+  getArrivalList,
+  getInHouseList,
+  getDepartureList,
+  getRevenueLedger,
+  allocateTeam,
+  rescheduleTeam,
+  cancelTeamBooking,
+  getTeamBookings
 } from './rooms.js';
 
 import { getPriceInfo } from './pricing.js';
-import { getTodayMetrics, getTrendData, getBookingHeatmap } from './revenue.js';
+import { getTodayMetrics, getTrendData, getBookingHeatmap, getRevenueBreakdown } from './revenue.js';
 import { renderTrendChart, renderHeatmap } from './charts.js';
 import {
   exportSnapshot,
@@ -40,6 +57,8 @@ import {
 
 const ROUTE_TITLES = {
   dashboard: '房态总览',
+  frontdesk: '到店执行台',
+  teams: '团队管理',
   pricing: '动态定价设置',
   reports: '收益报告',
   data: '数据管理'
@@ -81,6 +100,8 @@ function renderRoute() {
   });
   document.getElementById('page-title').textContent = ROUTE_TITLES[route] || '房态总览';
   if (route === 'dashboard') renderDashboard();
+  if (route === 'frontdesk') renderFrontdeskPage();
+  if (route === 'teams') renderTeamsPage();
   if (route === 'pricing') renderPricingPage();
   if (route === 'reports') renderReportsPage();
 }
@@ -381,6 +402,321 @@ function renderDashboard() {
   renderRoomGrid();
 }
 
+function renderFrontdeskPage() {
+  const today = getToday();
+  const tomorrow = addDays(today, 1);
+
+  const arrivals = getArrivalList();
+  const inHouse = getInHouseList();
+  const departures = getDepartureList();
+
+  document.getElementById('fd-date-today').textContent = formatDate(today);
+  document.getElementById('fd-date-tomorrow').textContent = formatDate(tomorrow);
+  document.getElementById('fd-arrival-count').textContent = arrivals.length;
+  document.getElementById('fd-inhouse-count').textContent = inHouse.length;
+  document.getElementById('fd-departure-count').textContent = departures.length;
+
+  renderBookingList('fd-arrival-list', arrivals, 'arrival');
+  renderBookingList('fd-inhouse-list', inHouse, 'inhouse');
+  renderBookingList('fd-departure-list', departures, 'departure');
+}
+
+function renderBookingList(containerId, bookings, type) {
+  const container = document.getElementById(containerId);
+  if (!bookings || bookings.length === 0) {
+    container.innerHTML = '<div class="empty-state">暂无记录</div>';
+    return;
+  }
+
+  container.innerHTML = bookings.map(b => {
+    const typeLabel = RoomTypeLabels[b.roomType] || b.roomType;
+    const priceTag = b.priceSource === PriceSource.MANUAL
+      ? `<span class="tag tag-manual">手动价 ¥${b.rate}</span>`
+      : `<span class="tag tag-dynamic">动态价 ¥${b.rate}</span>`;
+    const teamTag = b.teamName ? `<span class="tag tag-team">${b.teamName}</span>` : '';
+    const overbookTag = b.isOverbook ? `<span class="tag tag-overbook">超订</span>` : '';
+
+    let actions = '';
+    if (type === 'arrival') {
+      actions = `
+        <button class="btn btn-primary btn-sm" data-action="checkin" data-booking="${b.id}" data-room="${b.roomId}">办入住</button>
+        <button class="btn btn-outline btn-sm" data-action="cancel" data-booking="${b.id}" data-room="${b.roomId}">取消</button>
+      `;
+    } else if (type === 'inhouse') {
+      actions = `
+        <button class="btn btn-primary btn-sm" data-action="checkout" data-booking="${b.id}" data-room="${b.roomId}">结账</button>
+        <button class="btn btn-outline btn-sm" data-action="extend" data-booking="${b.id}" data-room="${b.roomId}">延住</button>
+        <button class="btn btn-outline btn-sm" data-action="change" data-booking="${b.id}" data-room="${b.roomId}" data-type="${b.roomType}">换房</button>
+      `;
+    } else if (type === 'departure') {
+      actions = `
+        <button class="btn btn-primary btn-sm" data-action="checkout" data-booking="${b.id}" data-room="${b.roomId}">提前结账</button>
+        <button class="btn btn-outline btn-sm" data-action="extend" data-booking="${b.id}" data-room="${b.roomId}">续住</button>
+      `;
+    }
+
+    return `
+      <div class="booking-card">
+        <div class="booking-card-header">
+          <span class="booking-room">${b.roomNumber}房 · ${typeLabel}</span>
+          ${overbookTag}
+        </div>
+        <div class="booking-card-body">
+          <div class="booking-info">
+            <span class="booking-guest">${b.guestName || '待登记'}</span>
+            ${teamTag}
+          </div>
+          <div class="booking-dates">
+            ${formatDate(b.checkInDate)} → ${formatDate(b.checkOutDate)}
+            <span class="booking-nights">${b.nights}晚</span>
+          </div>
+          <div class="booking-price-row">
+            ${priceTag}
+            <span class="booking-total">总计 ¥${b.totalPrice}</span>
+          </div>
+        </div>
+        <div class="booking-card-actions">
+          ${actions}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function handleFrontdeskAction(action, bookingId, roomId, extra = {}) {
+  switch (action) {
+    case 'checkin':
+      openCheckinModal(roomId, bookingId);
+      break;
+    case 'checkout':
+      if (confirm('确认办理结账？')) {
+        const result = checkOutBooking(roomId, bookingId);
+        if (result.ok) {
+          showToast(`结账成功，房费 ¥${result.revenue}`);
+          renderAll();
+        } else {
+          showToast(result.error, 'error');
+        }
+      }
+      break;
+    case 'cancel':
+      if (confirm('确认取消该预订？未到店预订不影响当日收益。')) {
+        const result = cancelBooking(roomId, bookingId, '前台取消');
+        if (result.ok) {
+          showToast('预订已取消');
+          renderAll();
+        } else {
+          showToast(result.error, 'error');
+        }
+      }
+      break;
+    case 'extend':
+      openExtendModal(roomId, bookingId);
+      break;
+    case 'change':
+      openChangeRoomModal(roomId, bookingId, extra.roomType);
+      break;
+  }
+}
+
+function openCheckinModal(roomId, bookingId) {
+  const rooms = getRooms();
+  const room = rooms.find(r => r.id === roomId);
+  const booking = (room?.bookings || []).find(b => b.id === bookingId);
+  if (!booking) return;
+
+  const html = `
+    <div class="modal-body">
+      <h3 class="modal-title">办理入住 - ${room.roomNumber}房</h3>
+      <div class="form-group">
+        <label>客人姓名</label>
+        <input type="text" id="ci-guest" class="input" value="${booking.guestName || ''}" placeholder="请输入客人姓名" />
+      </div>
+      <div class="form-group">
+        <label>入住日期</label>
+        <input type="date" id="ci-checkin" class="input" value="${booking.checkInDate}" readonly />
+      </div>
+      <div class="form-group">
+        <label>离店日期</label>
+        <input type="date" id="ci-checkout" class="input" value="${booking.checkOutDate}" readonly />
+      </div>
+      <div class="form-group">
+        <label>房价模式</label>
+        <div class="price-mode-switch">
+          <label class="radio-label">
+            <input type="radio" name="ci-price-mode" value="dynamic" ${booking.priceSource !== PriceSource.MANUAL ? 'checked' : ''} />
+            动态定价 (¥${booking.rate}/晚)
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="ci-price-mode" value="manual" ${booking.priceSource === PriceSource.MANUAL ? 'checked' : ''} />
+            手动房价
+          </label>
+        </div>
+      </div>
+      <div class="form-group" id="ci-manual-rate-group" style="${booking.priceSource !== PriceSource.MANUAL ? 'display:none;' : ''}">
+        <label>手动房价 (元/晚)</label>
+        <input type="number" id="ci-manual-rate" class="input" min="0" step="1" value="${booking.priceSource === PriceSource.MANUAL ? booking.rate : ''}" placeholder="请输入手动房价" />
+      </div>
+      <div class="price-banner" id="ci-price-banner">
+        总计：¥<span id="ci-total">${booking.totalPrice}</span>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="window.__closeModal()">取消</button>
+        <button class="btn btn-primary" id="btn-confirm-checkin">确认入住</button>
+      </div>
+    </div>
+  `;
+  openModal(html);
+
+  document.querySelectorAll('input[name="ci-price-mode"]').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const isManual = e.target.value === 'manual';
+      document.getElementById('ci-manual-rate-group').style.display = isManual ? 'block' : 'none';
+      if (!isManual) {
+        document.getElementById('ci-total').textContent = booking.totalPrice;
+      }
+    });
+  });
+
+  document.getElementById('ci-manual-rate').addEventListener('input', (e) => {
+    const rate = parseFloat(e.target.value) || 0;
+    const nights = booking.nights;
+    document.getElementById('ci-total').textContent = (rate * nights).toFixed(0);
+  });
+
+  document.getElementById('btn-confirm-checkin').addEventListener('click', () => {
+    const guestName = document.getElementById('ci-guest').value.trim();
+    const mode = document.querySelector('input[name="ci-price-mode"]:checked').value;
+    const manualRate = mode === 'manual' ? parseFloat(document.getElementById('ci-manual-rate').value) : null;
+
+    if (!guestName) {
+      showToast('请输入客人姓名', 'error');
+      return;
+    }
+    if (mode === 'manual' && (!manualRate || manualRate <= 0)) {
+      showToast('请输入有效的手动房价', 'error');
+      return;
+    }
+
+    const result = checkInRoom(roomId, { guestName, bookingId, manualRate });
+    if (result.ok) {
+      showToast(`${room.roomNumber}房 入住成功`);
+      closeModal();
+      renderAll();
+    } else {
+      showToast(result.error, 'error');
+    }
+  });
+}
+
+function openExtendModal(roomId, bookingId) {
+  const rooms = getRooms();
+  const room = rooms.find(r => r.id === roomId);
+  const booking = (room?.bookings || []).find(b => b.id === bookingId);
+  if (!booking) return;
+
+  const html = `
+    <div class="modal-body">
+      <h3 class="modal-title">延住 - ${room.roomNumber}房</h3>
+      <div class="form-group">
+        <label>当前离店日期</label>
+        <input type="date" class="input" value="${booking.checkOutDate}" readonly />
+      </div>
+      <div class="form-group">
+        <label>延住天数</label>
+        <input type="number" id="ext-nights" class="input" min="1" max="30" value="1" />
+      </div>
+      <div class="price-banner">
+        预计增加费用：¥<span id="ext-total">--</span>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="window.__closeModal()">取消</button>
+        <button class="btn btn-primary" id="btn-confirm-extend">确认延住</button>
+      </div>
+    </div>
+  `;
+  openModal(html);
+
+  const updateExtPrice = () => {
+    const nights = parseInt(document.getElementById('ext-nights').value, 10) || 0;
+    if (nights > 0) {
+      document.getElementById('ext-total').textContent = (booking.rate * nights).toFixed(0);
+    }
+  };
+  updateExtPrice();
+  document.getElementById('ext-nights').addEventListener('input', updateExtPrice);
+
+  document.getElementById('btn-confirm-extend').addEventListener('click', () => {
+    const nights = parseInt(document.getElementById('ext-nights').value, 10);
+    if (!nights || nights < 1) {
+      showToast('请输入有效的延住天数', 'error');
+      return;
+    }
+    const result = extendBooking(roomId, bookingId, nights);
+    if (result.ok) {
+      showToast(`延住成功，新增 ${nights} 晚`);
+      closeModal();
+      renderAll();
+    } else {
+      showToast(result.error, 'error');
+    }
+  });
+}
+
+function openChangeRoomModal(fromRoomId, bookingId, roomType) {
+  const rooms = getRooms();
+  const fromRoom = rooms.find(r => r.id === fromRoomId);
+  const booking = (fromRoom?.bookings || []).find(b => b.id === bookingId);
+  if (!booking) return;
+
+  const sameTypeRooms = rooms.filter(r => r.type === roomType && r.id !== fromRoomId);
+  const availableRooms = sameTypeRooms.filter(r => {
+    return !hasConflict(r, booking.checkInDate, booking.checkOutDate, bookingId);
+  });
+
+  const html = `
+    <div class="modal-body">
+      <h3 class="modal-title">换房 - 从${fromRoom.roomNumber}房</h3>
+      <div class="form-group">
+        <label>选择目标房间（${RoomTypeLabels[roomType]}）</label>
+        <div class="room-select-list">
+          ${availableRooms.length === 0
+            ? '<div class="empty-state">暂无可用房间</div>'
+            : availableRooms.map(r => `
+              <label class="room-select-item">
+                <input type="radio" name="change-to" value="${r.id}" />
+                <span class="room-select-number">${r.roomNumber}房</span>
+                <span class="room-select-status">${r.status === 'available' ? '空闲' : '有预订'}</span>
+              </label>
+            `).join('')
+          }
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="window.__closeModal()">取消</button>
+        <button class="btn btn-primary" id="btn-confirm-change" ${availableRooms.length === 0 ? 'disabled' : ''}>确认换房</button>
+      </div>
+    </div>
+  `;
+  openModal(html);
+
+  document.getElementById('btn-confirm-change').addEventListener('click', () => {
+    const selected = document.querySelector('input[name="change-to"]:checked');
+    if (!selected) {
+      showToast('请选择目标房间', 'error');
+      return;
+    }
+    const result = changeRoom(bookingId, fromRoomId, selected.value);
+    if (result.ok) {
+      showToast('换房成功');
+      closeModal();
+      renderAll();
+    } else {
+      showToast(result.error, 'error');
+    }
+  });
+}
+
 function renderPricingPage() {
   const pricing = getPricing();
   const baseForm = document.getElementById('base-price-form');
@@ -492,9 +828,331 @@ function savePricingFromForm() {
   renderAll();
 }
 
+function renderTeamsPage() {
+  const teams = getTeams();
+  const container = document.getElementById('team-list');
+  const statsEl = document.getElementById('team-stats');
+
+  const pendingCount = teams.filter(t => t.status === TeamStatus.PENDING).length;
+  const activeCount = teams.filter(t => t.status === TeamStatus.ALLOCATED || t.status === TeamStatus.PARTIAL).length;
+  const cancelledCount = teams.filter(t => t.status === TeamStatus.CANCELLED).length;
+  const totalRooms = teams.reduce((sum, t) => sum + (t.totalRooms || 0), 0);
+
+  statsEl.innerHTML = `
+    <div class="stat-item">
+      <div class="stat-value">${teams.length}</div>
+      <div class="stat-label">团队总数</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">${pendingCount}</div>
+      <div class="stat-label">待分房</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">${activeCount}</div>
+      <div class="stat-label">进行中</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value">${totalRooms}</div>
+      <div class="stat-label">总房间夜</div>
+    </div>
+  `;
+
+  if (teams.length === 0) {
+    container.innerHTML = '<div class="empty-state">暂无团队记录，从数据管理页导入团队预订</div>';
+    return;
+  }
+
+  container.innerHTML = teams.map(t => {
+    const statusMap = {
+      [TeamStatus.PENDING]: { label: '待分房', cls: 'tag-pending' },
+      [TeamStatus.ALLOCATED]: { label: '已分房', cls: 'tag-success' },
+      [TeamStatus.PARTIAL]: { label: '部分完成', cls: 'tag-warning' },
+      [TeamStatus.CANCELLED]: { label: '已取消', cls: 'tag-cancelled' }
+    };
+    const status = statusMap[t.status] || { label: t.status, cls: '' };
+
+    const roomsByType = {};
+    (t.bookings || []).forEach(b => {
+      if (!roomsByType[b.roomType]) roomsByType[b.roomType] = { count: 0, nights: 0 };
+      roomsByType[b.roomType].count++;
+      roomsByType[b.roomType].nights += b.nights;
+    });
+
+    const typeSummary = Object.entries(roomsByType).map(([type, info]) =>
+      `${RoomTypeLabels[type] || type} ${info.count}间×${info.nights}晚`
+    ).join('，');
+
+    let actions = '';
+    if (t.status === TeamStatus.PENDING) {
+      actions = `
+        <button class="btn btn-primary btn-sm" data-action="allocate" data-team="${t.id}">一键分房</button>
+        <button class="btn btn-outline btn-sm" data-action="reschedule" data-team="${t.id}">改期</button>
+        <button class="btn btn-outline btn-sm btn-danger" data-action="cancel-team" data-team="${t.id}">取消团队</button>
+      `;
+    } else if (t.status === TeamStatus.ALLOCATED || t.status === TeamStatus.PARTIAL) {
+      actions = `
+        <button class="btn btn-outline btn-sm" data-action="view" data-team="${t.id}">查看房间</button>
+        <button class="btn btn-outline btn-sm" data-action="reschedule" data-team="${t.id}">改期</button>
+      `;
+    }
+
+    return `
+      <div class="team-card">
+        <div class="team-card-header">
+          <div class="team-name">${t.name}</div>
+          <span class="tag ${status.cls}">${status.label}</span>
+        </div>
+        <div class="team-card-body">
+          <div class="team-info-row">
+            <span>入住：${formatDate(t.checkInDate)}</span>
+            <span>离店：${formatDate(t.checkOutDate)}</span>
+            <span>${t.nights}晚</span>
+          </div>
+          <div class="team-info-row">
+            <span class="text-muted">${typeSummary || '暂无房型信息'}</span>
+          </div>
+          <div class="team-info-row">
+            <span class="text-muted">总房费：¥${t.totalRevenue || 0}</span>
+            ${t.manualRate ? `<span class="tag tag-manual">团价</span>` : `<span class="tag tag-dynamic">动态价</span>`}
+          </div>
+        </div>
+        <div class="team-card-actions">
+          ${actions}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function handleTeamAction(action, teamId) {
+  const teams = getTeams();
+  const team = teams.find(t => t.id === teamId);
+  if (!team) return;
+
+  switch (action) {
+    case 'allocate':
+      if (confirm(`确认给团队「${team.name}」分配房间？`)) {
+        const result = allocateTeam(teamId);
+        if (result.ok) {
+          showToast(`分房成功，分配 ${result.allocated} 间`);
+          renderAll();
+        } else {
+          showToast(result.error, 'error');
+        }
+      }
+      break;
+    case 'reschedule':
+      openRescheduleModal(teamId);
+      break;
+    case 'cancel-team':
+    case 'cancel':
+      if (confirm(`确认取消整个团队「${team.name}」？所有相关预订将被取消。`)) {
+        const result = cancelTeamBooking(teamId, null, '团队取消');
+        if (result.ok) {
+          showToast('团队已取消');
+          renderAll();
+        } else {
+          showToast(result.error, 'error');
+        }
+      }
+      break;
+    case 'view':
+      openTeamDetailModal(teamId);
+      break;
+  }
+}
+
+function openRescheduleModal(teamId) {
+  const teams = getTeams();
+  const team = teams.find(t => t.id === teamId);
+  if (!team) return;
+
+  const html = `
+    <div class="modal-body">
+      <h3 class="modal-title">团队改期 - ${team.name}</h3>
+      <div class="form-group">
+        <label>原入住日期</label>
+        <input type="date" class="input" value="${team.checkInDate}" readonly />
+      </div>
+      <div class="form-group">
+        <label>新入住日期</label>
+        <input type="date" id="rs-new-date" class="input" value="${team.checkInDate}" min="${getToday()}" />
+      </div>
+      <div class="form-group">
+        <label>入住天数</label>
+        <input type="number" id="rs-nights" class="input" min="1" max="30" value="${team.nights}" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="window.__closeModal()">取消</button>
+        <button class="btn btn-primary" id="btn-confirm-reschedule">确认改期</button>
+      </div>
+    </div>
+  `;
+  openModal(html);
+
+  document.getElementById('btn-confirm-reschedule').addEventListener('click', () => {
+    const newDate = document.getElementById('rs-new-date').value;
+    const nights = parseInt(document.getElementById('rs-nights').value, 10);
+    if (!newDate) {
+      showToast('请选择入住日期', 'error');
+      return;
+    }
+    if (!nights || nights < 1) {
+      showToast('请输入有效的入住天数', 'error');
+      return;
+    }
+    const result = rescheduleTeam(teamId, newDate, nights);
+    if (result.ok) {
+      showToast('改期成功');
+      closeModal();
+      renderAll();
+    } else {
+      showToast(result.error, 'error');
+    }
+  });
+}
+
+function openTeamDetailModal(teamId) {
+  const bookings = getTeamBookings(teamId);
+  const teams = getTeams();
+  const team = teams.find(t => t.id === teamId);
+  if (!team) return;
+
+  const html = `
+    <div class="modal-body">
+      <h3 class="modal-title">${team.name} - 房间明细</h3>
+      <div class="team-detail-summary">
+        <span>共 ${bookings.length} 间</span>
+        <span>${formatDate(team.checkInDate)} → ${formatDate(team.checkOutDate)}</span>
+        <span>${team.nights}晚</span>
+      </div>
+      <div class="team-booking-list">
+        ${bookings.length === 0
+          ? '<div class="empty-state">暂无房间记录</div>'
+          : bookings.map(b => {
+              const statusMap = {
+                [BookingStatus.RESERVED]: '已预订',
+                [BookingStatus.CHECKED_IN]: '在住',
+                [BookingStatus.CHECKED_OUT]: '已离店',
+                [BookingStatus.CANCELLED]: '已取消'
+              };
+              const statusCls = b.status === BookingStatus.CANCELLED ? 'cancelled' : '';
+              const canCancel = b.status === BookingStatus.RESERVED;
+              return `
+                <div class="team-booking-item ${statusCls}">
+                  <div class="tbi-room">${b.roomNumber}房 · ${RoomTypeLabels[b.roomType] || b.roomType}</div>
+                  <div class="tbi-info">
+                    <span>${statusMap[b.status] || b.status}</span>
+                    <span>¥${b.rate}/晚</span>
+                    <span>共¥${b.totalPrice}</span>
+                  </div>
+                  ${canCancel ? `<button class="btn btn-outline btn-sm btn-danger" data-action="cancel-booking" data-team="${teamId}" data-booking="${b.id}" data-room="${b.roomId}">取消</button>` : ''}
+                </div>
+              `;
+            }).join('')
+        }
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-primary" onclick="window.__closeModal()">关闭</button>
+      </div>
+    </div>
+  `;
+  openModal(html);
+
+  document.querySelectorAll('[data-action="cancel-booking"]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const tid = e.target.dataset.team;
+      const bid = e.target.dataset.booking;
+      const rid = e.target.dataset.room;
+      if (confirm('确认取消该房间预订？')) {
+        const result = cancelTeamBooking(tid, bid, '团队单房取消');
+        if (result.ok) {
+          showToast('预订已取消');
+          closeModal();
+          renderAll();
+        } else {
+          showToast(result.error, 'error');
+        }
+      }
+    });
+  });
+}
+
 function renderReportsPage() {
   renderTrendChart(document.getElementById('trend-chart'), getTrendData(30));
   renderHeatmap(document.getElementById('heatmap-chart'), getBookingHeatmap(7));
+  renderRevenueLedgerTable();
+}
+
+function renderRevenueLedgerTable() {
+  const breakdown = getRevenueBreakdown(7);
+  const container = document.getElementById('ledger-table');
+  if (!container) return;
+
+  let totalRecognized = 0;
+  let totalPending = 0;
+  let totalCancelled = 0;
+  let totalDynamic = 0;
+  let totalManual = 0;
+
+  const rows = breakdown.map(d => {
+    totalRecognized += d.recognized;
+    totalPending += d.pending;
+    totalCancelled += d.cancelled;
+    totalDynamic += d.bySource?.dynamic || 0;
+    totalManual += d.bySource?.manual || 0;
+
+    const isToday = d.date === getToday();
+    const rowCls = isToday ? 'ledger-row-today' : '';
+
+    return `
+      <tr class="${rowCls}">
+        <td>${formatDate(d.date)}${isToday ? ' <span class="tag tag-success">今日</span>' : ''}</td>
+        <td class="text-right">${d.recognizedCount}间</td>
+        <td class="text-right text-success">¥${d.recognized.toLocaleString()}</td>
+        <td class="text-right">${d.pendingCount}间</td>
+        <td class="text-right text-warning">¥${d.pending.toLocaleString()}</td>
+        <td class="text-right">${d.cancelledCount}间</td>
+        <td class="text-right text-muted">¥${d.cancelled.toLocaleString()}</td>
+        <td class="text-right">¥${(d.bySource?.dynamic || 0).toLocaleString()}</td>
+        <td class="text-right">¥${(d.bySource?.manual || 0).toLocaleString()}</td>
+      </tr>
+    `;
+  }).join('');
+
+  container.innerHTML = `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>营业日</th>
+          <th class="text-right">已入账间数</th>
+          <th class="text-right">已入账金额</th>
+          <th class="text-right">待入账间数</th>
+          <th class="text-right">待入账金额</th>
+          <th class="text-right">已取消间数</th>
+          <th class="text-right">已取消金额</th>
+          <th class="text-right">动态定价</th>
+          <th class="text-right">手动房价</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td><strong>7日合计</strong></td>
+          <td class="text-right"><strong>${breakdown.reduce((s, d) => s + d.recognizedCount, 0)}间</strong></td>
+          <td class="text-right"><strong class="text-success">¥${totalRecognized.toLocaleString()}</strong></td>
+          <td class="text-right"><strong>${breakdown.reduce((s, d) => s + d.pendingCount, 0)}间</strong></td>
+          <td class="text-right"><strong class="text-warning">¥${totalPending.toLocaleString()}</strong></td>
+          <td class="text-right"><strong>${breakdown.reduce((s, d) => s + d.cancelledCount, 0)}间</strong></td>
+          <td class="text-right"><strong class="text-muted">¥${totalCancelled.toLocaleString()}</strong></td>
+          <td class="text-right"><strong>¥${totalDynamic.toLocaleString()}</strong></td>
+          <td class="text-right"><strong>¥${totalManual.toLocaleString()}</strong></td>
+        </tr>
+      </tfoot>
+    </table>
+  `;
 }
 
 function renderAll() {
@@ -577,6 +1235,26 @@ function bindEvents() {
       setTimeout(() => location.reload(), 1000);
     }
   });
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const bookingId = btn.dataset.booking;
+    const roomId = btn.dataset.room;
+    const roomType = btn.dataset.type;
+    const teamId = btn.dataset.team;
+
+    if (['checkin', 'checkout', 'cancel', 'extend', 'change'].includes(action)) {
+      e.preventDefault();
+      handleFrontdeskAction(action, bookingId, roomId, { roomType });
+    }
+    if (['allocate', 'reschedule', 'cancel-team', 'view'].includes(action)) {
+      e.preventDefault();
+      handleTeamAction(action, teamId);
+    }
+  });
+
   window.addEventListener('hashchange', renderRoute);
   subscribe(renderAll);
 
@@ -597,8 +1275,26 @@ function bindEvents() {
     getRoomDateStatus,
     countBookingsOnDate,
     getActiveBookingsForRoom,
+    cancelBooking,
+    extendBooking,
+    changeRoom,
+    getArrivalList,
+    getInHouseList,
+    getDepartureList,
+    getRevenueLedger,
+    getRevenueBreakdown,
+    allocateTeam,
+    rescheduleTeam,
+    cancelTeamBooking,
+    getTeamBookings,
+    getTeams,
+    createTeam,
+    updateTeam,
+    bulkBookTransactional,
     BookingStatus,
-    RoomTypes
+    RoomTypes,
+    PriceSource,
+    TeamStatus
   };
 }
 

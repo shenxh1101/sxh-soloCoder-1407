@@ -10,10 +10,12 @@ import {
   setToday,
   createDefaultRooms,
   createDefaultPricing,
-  addDays
+  addDays,
+  getTeams,
+  saveTeams
 } from './state.js';
 
-import { bulkBook, canAcceptBooking } from './rooms.js';
+import { bulkBookTransactional, canAcceptBooking } from './rooms.js';
 
 const RoomTypeMap = {
   '标准单人间': RoomTypes.SINGLE,
@@ -32,12 +34,13 @@ const RoomTypeMap = {
 
 function exportSnapshot() {
   const snapshot = {
-    version: '2.0',
+    version: '3.0',
     exportedAt: new Date().toISOString(),
     currentDate: getToday(),
     rooms: getRooms(),
     pricing: getPricing(),
-    revenueHistory: getRevenueHistory()
+    revenueHistory: getRevenueHistory(),
+    teams: getTeams()
   };
   const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -64,6 +67,7 @@ function importSnapshot(file) {
         saveRooms(data.rooms);
         savePricing(data.pricing);
         if (data.revenueHistory) saveRevenueHistory(data.revenueHistory);
+        if (data.teams) saveTeams(data.teams);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -103,6 +107,8 @@ function parseTeamBookings(text) {
     const count = parseInt(row['房间数'] || row['count'] || row['rooms'] || '1', 10);
     const checkInDate = row['入住日期'] || row['checkin'] || row['checkindate'] || row['date'] || '';
     const nights = parseInt(row['入住天数'] || row['天数'] || row['nights'] || '1', 10);
+    const rateRaw = row['房价'] || row['单价'] || row['rate'] || row['price'] || '';
+    const manualRate = rateRaw ? parseFloat(rateRaw) : null;
     if (!roomType) {
       errors.push(`第${idx + 2}行: 无效的房型 "${typeRaw}"`);
       return;
@@ -119,17 +125,22 @@ function parseTeamBookings(text) {
       errors.push(`第${idx + 2}行: 无效的入住天数`);
       return;
     }
+    if (manualRate !== null && (isNaN(manualRate) || manualRate <= 0)) {
+      errors.push(`第${idx + 2}行: 无效的房价`);
+      return;
+    }
     const check = canAcceptBooking(roomType, checkInDate, nights);
     if (!check.ok) {
       errors.push(`第${idx + 2}行: ${typeRaw} 在 ${check.date} 已达超订上限（${check.used}/${check.allowed}），无法预订 ${count} 间`);
       return;
     }
-    bookings.push({ teamName, roomType, count, checkInDate, nights });
+    bookings.push({ teamName, roomType, count, checkInDate, nights, manualRate });
   });
   return { bookings, errors };
 }
 
-function importTeamCSV(file) {
+function importTeamCSV(file, options = {}) {
+  const { asTeam = false, teamName = '' } = options;
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -139,8 +150,8 @@ function importTeamCSV(file) {
           reject(new Error(errors.join('\n')));
           return;
         }
-        const result = bulkBook(bookings);
-        if (result.errors.length > 0) {
+        const result = bulkBookTransactional(bookings);
+        if (!result.ok) {
           reject(new Error(result.errors.join('\n')));
           return;
         }
@@ -158,10 +169,10 @@ function generateSampleCSV() {
   const today = getToday();
   const tomorrow = addDays(today, 1);
   const content = [
-    '团队名称,房型,房间数,入住日期,入住天数',
-    `今日入住团,标准双人间,3,${today},3`,
-    `明天预订团,豪华套房,2,${tomorrow},2`,
-    `远期家庭团,家庭套房,4,${addDays(today, 7)},5`
+    '团队名称,房型,房间数,入住日期,入住天数,房价(元/晚,可选)',
+    `今日入住团,标准双人间,3,${today},3,`,
+    `明天预订团,豪华套房,2,${tomorrow},2,1388`,
+    `远期家庭团,家庭套房,4,${addDays(today, 7)},5,`
   ].join('\n');
   const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);

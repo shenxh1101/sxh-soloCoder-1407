@@ -2,7 +2,8 @@ const STORAGE_KEYS = {
   ROOMS: 'hotel_rooms_state',
   PRICING: 'hotel_pricing_config',
   REVENUE: 'hotel_revenue_history',
-  TODAY: 'hotel_current_date'
+  TODAY: 'hotel_current_date',
+  TEAMS: 'hotel_teams'
 };
 
 const RoomTypes = {
@@ -29,7 +30,20 @@ const RoomTypePrefix = {
 const BookingStatus = {
   RESERVED: 'reserved',
   CHECKED_IN: 'checked_in',
-  CHECKED_OUT: 'checked_out'
+  CHECKED_OUT: 'checked_out',
+  CANCELLED: 'cancelled'
+};
+
+const PriceSource = {
+  DYNAMIC: 'dynamic',
+  MANUAL: 'manual'
+};
+
+const TeamStatus = {
+  PENDING: 'pending',
+  ALLOCATED: 'allocated',
+  PARTIAL: 'partial',
+  CANCELLED: 'cancelled'
 };
 
 const listeners = new Set();
@@ -100,9 +114,20 @@ function setToday(dateStr) {
 }
 
 function migrateLegacyRoom(room) {
-  if (room.bookings) return room;
+  if (room.bookings && room.bookings.every(b => b.priceSource !== undefined)) return room;
   const bookings = [];
-  if (room.status && room.status !== 'vacant') {
+  if (room.bookings) {
+    room.bookings.forEach(b => {
+      bookings.push({
+        ...b,
+        priceSource: b.manualRateUsed || b.dailyRate ? PriceSource.MANUAL : PriceSource.DYNAMIC,
+        teamId: b.teamId || null,
+        teamName: b.teamName || null,
+        cancelledAt: b.cancelledAt || null,
+        cancellationReason: b.cancellationReason || null
+      });
+    });
+  } else if (room.status && room.status !== 'vacant') {
     const bookingStatus = room.status === 'occupied' ? BookingStatus.CHECKED_IN : BookingStatus.RESERVED;
     if (room.checkInDate && room.checkOutDate) {
       bookings.push({
@@ -116,7 +141,12 @@ function migrateLegacyRoom(room) {
         dailyBreakdown: room.dailyBreakdown || [],
         bookingDate: room.bookingDate || getToday(),
         status: bookingStatus,
-        isOverbook: false
+        isOverbook: false,
+        priceSource: PriceSource.DYNAMIC,
+        teamId: null,
+        teamName: null,
+        cancelledAt: null,
+        cancellationReason: null
       });
     }
   }
@@ -259,7 +289,55 @@ function resetAllData() {
   localStorage.removeItem(STORAGE_KEYS.PRICING);
   localStorage.removeItem(STORAGE_KEYS.REVENUE);
   localStorage.removeItem(STORAGE_KEYS.TODAY);
+  localStorage.removeItem(STORAGE_KEYS.TEAMS);
   notify();
+}
+
+function getTeams() {
+  const raw = localStorage.getItem(STORAGE_KEYS.TEAMS);
+  if (raw === null) return [];
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+function saveTeams(teams) {
+  saveToStorage(STORAGE_KEYS.TEAMS, teams);
+  notify();
+}
+
+function createTeam(options) {
+  const { name, roomType, checkInDate, nights, count, contact = '', remark = '' } = options;
+  const teams = getTeams();
+  const team = {
+    id: genId('team'),
+    name,
+    roomType,
+    checkInDate,
+    nights,
+    count,
+    contact,
+    remark,
+    status: TeamStatus.PENDING,
+    bookingIds: [],
+    createdAt: getToday(),
+    allocatedCount: 0,
+    cancelledCount: 0
+  };
+  teams.push(team);
+  saveTeams(teams);
+  return team;
+}
+
+function updateTeam(teamId, updates) {
+  const teams = getTeams();
+  const idx = teams.findIndex(t => t.id === teamId);
+  if (idx < 0) throw new Error('团队不存在');
+  teams[idx] = { ...teams[idx], ...updates };
+  saveTeams(teams);
+  return teams[idx];
 }
 
 export {
@@ -267,6 +345,8 @@ export {
   RoomTypeLabels,
   RoomTypePrefix,
   BookingStatus,
+  PriceSource,
+  TeamStatus,
   STORAGE_KEYS,
   subscribe,
   getToday,
@@ -286,5 +366,9 @@ export {
   appendRevenueRecord,
   resetAllData,
   createDefaultRooms,
-  createDefaultPricing
+  createDefaultPricing,
+  getTeams,
+  saveTeams,
+  createTeam,
+  updateTeam
 };

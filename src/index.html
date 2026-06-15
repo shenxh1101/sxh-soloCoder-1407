@@ -24,6 +24,14 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
           <span>房态总览</span>
         </a>
+        <a href="#/frontdesk" class="nav-item" data-route="frontdesk">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><line x1="16" y1="3.13" x2="16" y2="3.14"/></svg>
+          <span>到店执行台</span>
+        </a>
+        <a href="#/teams" class="nav-item" data-route="teams">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>团队管理</span>
+        </a>
         <a href="#/pricing" class="nav-item" data-route="pricing">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           <span>动态定价</span>
@@ -123,6 +131,67 @@
         </div>
       </section>
 
+      <section class="page hidden" id="page-frontdesk">
+        <div class="fd-header">
+          <div class="fd-date-badge">
+            <span class="fd-date-label">今日</span>
+            <span class="fd-date-value" id="fd-date-today">--</span>
+          </div>
+          <div class="fd-header-stats">
+            <div class="fd-stat">
+              <span class="fd-stat-value" id="fd-arrival-count">0</span>
+              <span class="fd-stat-label">今日待入住</span>
+            </div>
+            <div class="fd-stat">
+              <span class="fd-stat-value" id="fd-inhouse-count">0</span>
+              <span class="fd-stat-label">当前在住</span>
+            </div>
+            <div class="fd-stat">
+              <span class="fd-stat-value" id="fd-departure-count">0</span>
+              <span class="fd-stat-label">明日离店</span>
+            </div>
+          </div>
+        </div>
+        <div class="fd-columns">
+          <div class="fd-column">
+            <div class="fd-col-header fd-col-arrival">
+              <h3>今日待入住</h3>
+              <span class="fd-col-date" id="fd-date-today-small">今日</span>
+            </div>
+            <div class="fd-col-body" id="fd-arrival-list"></div>
+          </div>
+          <div class="fd-column">
+            <div class="fd-col-header fd-col-inhouse">
+              <h3>当前在住</h3>
+              <span class="fd-col-date">在店中</span>
+            </div>
+            <div class="fd-col-body" id="fd-inhouse-list"></div>
+          </div>
+          <div class="fd-column">
+            <div class="fd-col-header fd-col-departure">
+              <h3>明日离店</h3>
+              <span class="fd-col-date" id="fd-date-tomorrow">明日</span>
+            </div>
+            <div class="fd-col-body" id="fd-departure-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-teams">
+        <div class="card">
+          <div class="card-header">
+            <h3>团队概览</h3>
+          </div>
+          <div class="team-stats" id="team-stats"></div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h3>团队列表</h3>
+          </div>
+          <div class="team-list" id="team-list"></div>
+        </div>
+      </section>
+
       <section class="page hidden" id="page-pricing">
         <div class="card">
           <div class="card-header"><h3>基础房价设置</h3></div>
@@ -163,6 +232,10 @@
         <div class="card">
           <div class="card-header"><h3>未来7天预订热力图</h3></div>
           <div class="heatmap-container" id="heatmap-chart"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>未来7天房费流水明细</h3></div>
+          <div class="ledger-table-container" id="ledger-table"></div>
         </div>
       </section>
 

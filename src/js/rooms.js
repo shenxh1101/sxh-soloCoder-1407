@@ -1,6 +1,8 @@
 import {
   RoomTypes,
   BookingStatus,
+  PriceSource,
+  TeamStatus,
   getRooms,
   saveRooms,
   getPricing,
@@ -10,7 +12,10 @@ import {
   getRevenueHistory,
   bookingDatesOverlap,
   datesOverlap,
-  genId
+  genId,
+  getTeams,
+  saveTeams,
+  updateTeam
 } from './state.js';
 
 import { calculateStayTotal } from './pricing.js';
@@ -20,7 +25,9 @@ function getRoomsByType(type) {
 }
 
 function getActiveBookings(room) {
-  return (room.bookings || []).filter(b => b.status !== BookingStatus.CHECKED_OUT);
+  return (room.bookings || []).filter(b =>
+    b.status !== BookingStatus.CHECKED_OUT && b.status !== BookingStatus.CANCELLED
+  );
 }
 
 function getBookingOnDate(room, dateStr) {
@@ -170,7 +177,10 @@ function createBooking(roomId, options) {
     checkInDate,
     nights,
     manualRate = null,
-    status = BookingStatus.CHECKED_IN
+    status = BookingStatus.CHECKED_IN,
+    teamId = null,
+    teamName = null,
+    skipAvailabilityCheck = false
   } = options;
   if (!guestName || !checkInDate || !nights) {
     throw new Error('客人姓名、入住日期和入住天数不能为空');
@@ -179,14 +189,17 @@ function createBooking(roomId, options) {
   const room = rooms.find(r => r.id === roomId);
   if (!room) throw new Error('房间不存在');
   const checkOutDate = addDays(checkInDate, nights);
-  const check = canAcceptBooking(room.type, checkInDate, nights);
-  if (!check.ok) {
-    throw new Error(`该房型在 ${check.date} 已达超订上限（${check.used}/${check.allowed}），无法新增预订`);
+  if (!skipAvailabilityCheck) {
+    const check = canAcceptBooking(room.type, checkInDate, nights);
+    if (!check.ok) {
+      throw new Error(`该房型在 ${check.date} 已达超订上限（${check.used}/${check.allowed}），无法新增预订`);
+    }
   }
-  const isOverbook = willBeOverbook(room.type, checkInDate, nights);
+  const isOverbook = skipAvailabilityCheck ? false : willBeOverbook(room.type, checkInDate, nights);
   if (!isOverbook && hasConflict(room, checkInDate, checkOutDate)) {
     throw new Error('该房间在所选日期已有预订，存在日期冲突');
   }
+  const priceSource = manualRate && manualRate > 0 ? PriceSource.MANUAL : PriceSource.DYNAMIC;
   let totalPrice, dailyBreakdown, dailyRate;
   if (manualRate && manualRate > 0) {
     dailyRate = Math.round(manualRate);
@@ -211,7 +224,13 @@ function createBooking(roomId, options) {
     dailyBreakdown,
     bookingDate: getToday(),
     status,
-    isOverbook
+    isOverbook,
+    priceSource,
+    teamId,
+    teamName,
+    cancelledAt: null,
+    cancellationReason: null,
+    roomId: room.id
   };
   room.bookings = room.bookings || [];
   room.bookings.push(booking);
@@ -220,7 +239,38 @@ function createBooking(roomId, options) {
 }
 
 function checkInRoom(roomId, options) {
-  return createBooking(roomId, { ...options, status: BookingStatus.CHECKED_IN });
+  const { bookingId, guestName, manualRate = null } = options;
+  const rooms = getRooms();
+  const room = rooms.find(r => r.id === roomId);
+  if (!room) throw new Error('房间不存在');
+
+  if (bookingId) {
+    const booking = (room.bookings || []).find(b => b.id === bookingId);
+    if (!booking) throw new Error('预订记录不存在');
+    if (booking.status === BookingStatus.CHECKED_IN) throw new Error('该预订已入住');
+    if (booking.status === BookingStatus.CHECKED_OUT) throw new Error('该预订已退房');
+    if (booking.status === BookingStatus.CANCELLED) throw new Error('该预订已取消');
+
+    if (guestName) booking.guestName = guestName;
+
+    if (manualRate && manualRate > 0) {
+      const newRate = Math.round(manualRate);
+      booking.priceSource = PriceSource.MANUAL;
+      booking.dailyRate = newRate;
+      booking.totalPrice = newRate * booking.nights;
+      booking.dailyBreakdown = countDatesInRange(booking.checkInDate, booking.checkOutDate).map(date => ({
+        date, rate: newRate
+      }));
+    }
+
+    booking.status = BookingStatus.CHECKED_IN;
+    booking.checkInActualDate = getToday();
+    saveRooms(rooms);
+    return { ok: true, room, booking };
+  }
+
+  const result = createBooking(roomId, { ...options, status: BookingStatus.CHECKED_IN });
+  return { ok: true, room: result.room, booking: result.booking };
 }
 
 function reserveRoom(roomId, options) {
@@ -303,6 +353,426 @@ function bulkBook(bookings) {
   return { results, errors };
 }
 
+function bulkBookTransactional(bookings) {
+  const rooms = getRooms();
+  const roomsSnapshot = JSON.parse(JSON.stringify(rooms));
+  const results = [];
+  const errors = [];
+  try {
+    for (const b of bookings) {
+      for (let i = 0; i < b.count; i++) {
+        const check = canAcceptBooking(b.roomType, b.checkInDate, b.nights);
+        if (!check.ok) {
+          errors.push(`${b.teamName || '团队'}-${i + 1}: ${b.roomType} 在 ${check.date} 超订上限（已用${check.used}/${check.allowed}）`);
+          continue;
+        }
+        let room = findAvailableRoom(b.roomType, b.checkInDate, b.nights);
+        if (!room) {
+          const typedRooms = getRoomsByType(b.roomType);
+          room = typedRooms[0];
+          if (!room) {
+            errors.push(`${b.teamName || '团队'}-${i + 1}: 房型不存在`);
+            continue;
+          }
+        }
+        const r = reserveRoom(room.id, {
+          guestName: `${b.teamName || '团队'}-${i + 1}`,
+          checkInDate: b.checkInDate,
+          nights: b.nights,
+          manualRate: b.manualRate || null,
+          teamId: b.teamId || null,
+          teamName: b.teamName || null
+        });
+        results.push(r);
+      }
+    }
+    if (errors.length > 0) {
+      saveRooms(roomsSnapshot);
+      return { ok: false, results: [], errors, rolledBack: true };
+    }
+    return { ok: true, results, errors: [], rolledBack: false };
+  } catch (e) {
+    saveRooms(roomsSnapshot);
+    return { ok: false, results: [], errors: [e.message], rolledBack: true };
+  }
+}
+
+function cancelBooking(roomId, bookingId, reason = '') {
+  const rooms = getRooms();
+  const room = rooms.find(r => r.id === roomId);
+  if (!room) throw new Error('房间不存在');
+  const booking = (room.bookings || []).find(b => b.id === bookingId);
+  if (!booking) throw new Error('预订记录不存在');
+  if (booking.status === BookingStatus.CHECKED_OUT) {
+    throw new Error('已结账订单不能取消');
+  }
+  if (booking.status === BookingStatus.CANCELLED) {
+    throw new Error('订单已取消');
+  }
+  if (booking.status === BookingStatus.CHECKED_IN) {
+    throw new Error('客人已在住，请先办理退房');
+  }
+  const today = getToday();
+  booking.status = BookingStatus.CANCELLED;
+  booking.cancelledAt = today;
+  booking.cancellationReason = reason;
+  saveRooms(rooms);
+  if (booking.teamId) {
+    const teams = getTeams();
+    const team = teams.find(t => t.id === booking.teamId);
+    if (team) {
+      team.cancelledCount = (team.cancelledCount || 0) + 1;
+      team.bookingIds = (team.bookingIds || []).filter(id => id !== bookingId);
+      if (team.cancelledCount >= team.count) {
+        team.status = TeamStatus.CANCELLED;
+      } else if (team.status === TeamStatus.ALLOCATED) {
+        team.status = TeamStatus.PARTIAL;
+      }
+      saveTeams(teams);
+    }
+  }
+  return { ok: true, room, booking };
+}
+
+function extendBooking(roomId, bookingId, extraNights) {
+  if (!extraNights || extraNights <= 0) throw new Error('延住天数必须大于0');
+  const rooms = getRooms();
+  const room = rooms.find(r => r.id === roomId);
+  if (!room) throw new Error('房间不存在');
+  const booking = (room.bookings || []).find(b => b.id === bookingId);
+  if (!booking) throw new Error('预订记录不存在');
+  if (booking.status === BookingStatus.CHECKED_OUT) throw new Error('订单已退房');
+  if (booking.status === BookingStatus.CANCELLED) throw new Error('订单已取消');
+  const newCheckOutDate = addDays(booking.checkOutDate, extraNights);
+  const conflictCheck = hasConflict(room, booking.checkOutDate, newCheckOutDate, bookingId);
+  if (conflictCheck && !booking.isOverbook) {
+    throw new Error('延住日期与该房间其他预订冲突');
+  }
+  const remainingNights = extraNights;
+  let extraRevenue = 0;
+  const extraBreakdown = [];
+  for (let i = 0; i < remainingNights; i++) {
+    const date = addDays(booking.checkOutDate, i);
+    const rate = booking.dailyRate;
+    extraRevenue += rate;
+    extraBreakdown.push({ date, rate });
+  }
+  booking.nights += extraNights;
+  booking.checkOutDate = newCheckOutDate;
+  booking.totalPrice += extraRevenue;
+  booking.dailyBreakdown = [...booking.dailyBreakdown, ...extraBreakdown];
+  saveRooms(rooms);
+  return { ok: true, room, booking, extraRevenue, newCheckOutDate };
+}
+
+function changeRoom(bookingId, fromRoomId, toRoomId) {
+  if (fromRoomId === toRoomId) throw new Error('新房与原房相同');
+  const rooms = getRooms();
+  const fromRoom = rooms.find(r => r.id === fromRoomId);
+  const toRoom = rooms.find(r => r.id === toRoomId);
+  if (!fromRoom || !toRoom) throw new Error('房间不存在');
+  if (fromRoom.type !== toRoom.type) {
+    throw new Error('换房只能在相同房型之间进行');
+  }
+  const bookingIdx = (fromRoom.bookings || []).findIndex(b => b.id === bookingId);
+  if (bookingIdx < 0) throw new Error('原房间无此预订');
+  const booking = fromRoom.bookings[bookingIdx];
+  if (booking.status === BookingStatus.CHECKED_OUT) throw new Error('已退房订单不能换房');
+  if (booking.status === BookingStatus.CANCELLED) throw new Error('已取消订单不能换房');
+  if (!booking.isOverbook && hasConflict(toRoom, booking.checkInDate, booking.checkOutDate)) {
+    throw new Error('目标房间在所选日期已有预订');
+  }
+  fromRoom.bookings.splice(bookingIdx, 1);
+  booking.roomId = toRoomId;
+  toRoom.bookings = toRoom.bookings || [];
+  toRoom.bookings.push(booking);
+  saveRooms(rooms);
+  return { ok: true, fromRoom, toRoom, booking };
+}
+
+function getArrivalList() {
+  const today = getToday();
+  const arrivals = [];
+  getRooms().forEach(room => {
+    (room.bookings || []).forEach(b => {
+      if (b.status !== BookingStatus.RESERVED) return;
+      if (b.checkInDate !== today) return;
+      arrivals.push({
+        bookingId: b.id,
+        roomId: room.id,
+        roomNumber: room.number,
+        roomType: room.type,
+        guestName: b.guestName,
+        checkInDate: b.checkInDate,
+        checkOutDate: b.checkOutDate,
+        nights: b.nights,
+        dailyRate: b.dailyRate,
+        totalPrice: b.totalPrice,
+        priceSource: b.priceSource,
+        teamId: b.teamId,
+        teamName: b.teamName,
+        isOverbook: b.isOverbook
+      });
+    });
+  });
+  return arrivals.sort((a, b) => a.roomNumber - b.roomNumber);
+}
+
+function getInHouseList() {
+  const today = getToday();
+  const inHouse = [];
+  getRooms().forEach(room => {
+    (room.bookings || []).forEach(b => {
+      if (b.status !== BookingStatus.CHECKED_IN) return;
+      if (!(today >= b.checkInDate && today < b.checkOutDate)) return;
+      inHouse.push({
+        bookingId: b.id,
+        roomId: room.id,
+        roomNumber: room.number,
+        roomType: room.type,
+        guestName: b.guestName,
+        checkInDate: b.checkInDate,
+        checkOutDate: b.checkOutDate,
+        nights: b.nights,
+        remainingNights: (b.checkOutDate > today) ? Math.ceil((new Date(b.checkOutDate) - new Date(today)) / (1000 * 60 * 60 * 24)) : 0,
+        dailyRate: b.dailyRate,
+        totalPrice: b.totalPrice,
+        priceSource: b.priceSource,
+        teamId: b.teamId,
+        teamName: b.teamName,
+        isOverbook: b.isOverbook
+      });
+    });
+  });
+  return inHouse.sort((a, b) => a.roomNumber - b.roomNumber);
+}
+
+function getDepartureList() {
+  const today = getToday();
+  const tomorrow = addDays(today, 1);
+  const departures = [];
+  getRooms().forEach(room => {
+    (room.bookings || []).forEach(b => {
+      if (b.status !== BookingStatus.CHECKED_IN) return;
+      if (b.checkOutDate !== tomorrow) return;
+      departures.push({
+        bookingId: b.id,
+        roomId: room.id,
+        roomNumber: room.number,
+        roomType: room.type,
+        guestName: b.guestName,
+        checkInDate: b.checkInDate,
+        checkOutDate: b.checkOutDate,
+        nights: b.nights,
+        dailyRate: b.dailyRate,
+        totalPrice: b.totalPrice,
+        priceSource: b.priceSource,
+        teamId: b.teamId,
+        teamName: b.teamName
+      });
+    });
+  });
+  return departures.sort((a, b) => a.roomNumber - b.roomNumber);
+}
+
+function getRevenueLedger(dateStr) {
+  const rooms = getRooms();
+  const ledger = {
+    date: dateStr,
+    checkedIn: [],
+    reserved: [],
+    checkedOut: [],
+    cancelled: [],
+    totals: {
+      checkedInRevenue: 0,
+      reservedRevenue: 0,
+      checkedOutRevenue: 0,
+      cancelledRevenue: 0,
+      manualRevenue: 0,
+      dynamicRevenue: 0
+    }
+  };
+  rooms.forEach(room => {
+    (room.bookings || []).forEach(b => {
+      const coversDate = dateStr >= b.checkInDate && dateStr < b.checkOutDate;
+      if (!coversDate && b.status !== BookingStatus.CHECKED_OUT) return;
+      let nightRate = 0;
+      if (coversDate) {
+        const dayEntry = b.dailyBreakdown?.find(d => d.date === dateStr);
+        nightRate = dayEntry ? dayEntry.rate : b.dailyRate;
+      }
+      const entry = {
+        bookingId: b.id,
+        roomId: room.id,
+        roomType: room.type,
+        guestName: b.guestName,
+        checkInDate: b.checkInDate,
+        checkOutDate: b.checkOutDate,
+        nightRate,
+        priceSource: b.priceSource,
+        teamId: b.teamId,
+        teamName: b.teamName,
+        status: b.status
+      };
+      if (b.status === BookingStatus.CHECKED_IN && coversDate) {
+        ledger.checkedIn.push(entry);
+        ledger.totals.checkedInRevenue += nightRate;
+        if (b.priceSource === PriceSource.MANUAL) ledger.totals.manualRevenue += nightRate;
+        else ledger.totals.dynamicRevenue += nightRate;
+      } else if (b.status === BookingStatus.RESERVED && coversDate) {
+        ledger.reserved.push(entry);
+        ledger.totals.reservedRevenue += nightRate;
+        if (b.priceSource === PriceSource.MANUAL) ledger.totals.manualRevenue += nightRate;
+        else ledger.totals.dynamicRevenue += nightRate;
+      } else if (b.status === BookingStatus.CHECKED_OUT && b.checkOutActualDate === dateStr) {
+        ledger.checkedOut.push({ ...entry, totalAmount: b.totalPrice });
+        ledger.totals.checkedOutRevenue += b.totalPrice;
+        if (b.priceSource === PriceSource.MANUAL) ledger.totals.manualRevenue += b.totalPrice;
+        else ledger.totals.dynamicRevenue += b.totalPrice;
+      } else if (b.status === BookingStatus.CANCELLED && b.cancelledAt === dateStr) {
+        ledger.cancelled.push({ ...entry, reason: b.cancellationReason });
+        ledger.totals.cancelledRevenue += b.totalPrice;
+      }
+    });
+  });
+  return ledger;
+}
+
+function allocateTeam(teamId) {
+  const teams = getTeams();
+  const team = teams.find(t => t.id === teamId);
+  if (!team) throw new Error('团队不存在');
+  if (team.status === TeamStatus.ALLOCATED) {
+    throw new Error('该团队已完成分房');
+  }
+  if (team.status === TeamStatus.CANCELLED) {
+    throw new Error('该团队已取消');
+  }
+  const pendingCount = team.count - (team.allocatedCount || 0) - (team.cancelledCount || 0);
+  if (pendingCount <= 0) throw new Error('没有待分房的订单');
+  const bookingsToCreate = [{
+    roomType: team.roomType,
+    checkInDate: team.checkInDate,
+    nights: team.nights,
+    count: pendingCount,
+    teamName: team.name,
+    teamId: team.id
+  }];
+  const result = bulkBookTransactional(bookingsToCreate);
+  if (!result.ok) {
+    return { ok: false, errors: result.errors, allocatedCount: 0 };
+  }
+  const bookingIds = result.results.map(r => r.booking.id);
+  team.allocatedCount = (team.allocatedCount || 0) + bookingIds.length;
+  team.bookingIds = [...(team.bookingIds || []), ...bookingIds];
+  if (team.allocatedCount >= team.count) {
+    team.status = TeamStatus.ALLOCATED;
+  } else {
+    team.status = TeamStatus.PARTIAL;
+  }
+  saveTeams(teams);
+  return { ok: true, allocatedCount: bookingIds.length, bookingIds, errors: [] };
+}
+
+function rescheduleTeam(teamId, newCheckInDate) {
+  const teams = getTeams();
+  const team = teams.find(t => t.id === teamId);
+  if (!team) throw new Error('团队不存在');
+  if (team.status === TeamStatus.CANCELLED) throw new Error('团队已取消');
+  if (!team.bookingIds || team.bookingIds.length === 0) {
+    team.checkInDate = newCheckInDate;
+    saveTeams(teams);
+    return { ok: true, movedCount: 0 };
+  }
+  const rooms = getRooms();
+  const roomsSnapshot = JSON.parse(JSON.stringify(rooms));
+  const oldBookings = [];
+  team.bookingIds.forEach(bid => {
+    rooms.forEach(room => {
+      const b = (room.bookings || []).find(x => x.id === bid);
+      if (b) oldBookings.push({ roomId: room.id, booking: { ...b } });
+    });
+  });
+  try {
+    oldBookings.forEach(({ roomId, booking }) => {
+      const room = rooms.find(r => r.id === roomId);
+      if (!room) return;
+      const idx = room.bookings.findIndex(x => x.id === booking.id);
+      if (idx >= 0) room.bookings.splice(idx, 1);
+    });
+    saveRooms(rooms);
+    const newBookings = [];
+    for (let i = 0; i < oldBookings.length; i++) {
+      const oldBk = oldBookings[i].booking;
+      let room = findAvailableRoom(team.roomType, newCheckInDate, team.nights);
+      if (!room) {
+        const typedRooms = getRoomsByType(team.roomType);
+        room = typedRooms[0];
+      }
+      if (!room) throw new Error('无可用房间');
+      const r = reserveRoom(room.id, {
+        guestName: oldBk.guestName,
+        checkInDate: newCheckInDate,
+        nights: team.nights,
+        manualRate: oldBk.dailyRate,
+        teamId: team.id,
+        teamName: team.name
+      });
+      newBookings.push(r.booking);
+    }
+    team.checkInDate = newCheckInDate;
+    team.bookingIds = newBookings.map(b => b.id);
+    saveTeams(teams);
+    return { ok: true, movedCount: newBookings.length, newCheckInDate };
+  } catch (e) {
+    saveRooms(roomsSnapshot);
+    return { ok: false, error: e.message, movedCount: 0 };
+  }
+}
+
+function cancelTeamBooking(teamId, bookingId, reason = '') {
+  const teams = getTeams();
+  const team = teams.find(t => t.id === teamId);
+  if (!team) throw new Error('团队不存在');
+  const rooms = getRooms();
+  let targetRoom = null;
+  let targetBooking = null;
+  rooms.forEach(room => {
+    const b = (room.bookings || []).find(x => x.id === bookingId);
+    if (b) { targetRoom = room; targetBooking = b; }
+  });
+  if (!targetBooking) throw new Error('预订不存在');
+  if (targetBooking.status === BookingStatus.CHECKED_IN) {
+    throw new Error('客人已在住，请先办理退房');
+  }
+  const result = cancelBooking(targetRoom.id, bookingId, reason);
+  return { ok: true, room: result.room, booking: result.booking };
+}
+
+function getTeamBookings(teamId) {
+  const rooms = getRooms();
+  const bookings = [];
+  rooms.forEach(room => {
+    (room.bookings || []).forEach(b => {
+      if (b.teamId === teamId) {
+        bookings.push({
+          ...b,
+          roomId: room.id,
+          roomNumber: room.number,
+          roomType: room.type
+        });
+      }
+    });
+  });
+  return bookings.sort((a, b) => {
+    if (a.status !== b.status) {
+      const order = { reserved: 0, checked_in: 1, checked_out: 2, cancelled: 3 };
+      return order[a.status] - order[b.status];
+    }
+    return a.roomNumber - b.roomNumber;
+  });
+}
+
 export {
   getRoomsByType,
   getActiveBookings,
@@ -320,5 +790,17 @@ export {
   checkOutBooking,
   getActiveBookingsForRoom,
   bulkBook,
+  bulkBookTransactional,
+  cancelBooking,
+  extendBooking,
+  changeRoom,
+  getArrivalList,
+  getInHouseList,
+  getDepartureList,
+  getRevenueLedger,
+  allocateTeam,
+  rescheduleTeam,
+  cancelTeamBooking,
+  getTeamBookings,
   countDatesInRange
 };
