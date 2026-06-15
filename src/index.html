@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>悦享酒店 · 房态管理与动态定价系统</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700&family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">悦</div>
+        <div class="brand-text">
+          <h1>悦享酒店</h1>
+          <p>房态管理系统</p>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="#/dashboard" class="nav-item active" data-route="dashboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span>房态总览</span>
+        </a>
+        <a href="#/pricing" class="nav-item" data-route="pricing">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          <span>动态定价</span>
+        </a>
+        <a href="#/reports" class="nav-item" data-route="reports">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          <span>收益报告</span>
+        </a>
+        <a href="#/data" class="nav-item" data-route="data">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span>数据管理</span>
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="date-display">
+          <span class="date-label">当前营业日期</span>
+          <span class="date-value" id="sidebar-date">--</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h2 class="page-title" id="page-title">房态总览</h2>
+        </div>
+        <div class="topbar-right">
+          <div class="today-controls">
+            <button class="btn btn-ghost btn-sm" id="btn-prev-day">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            <input type="date" id="today-picker" class="date-picker" />
+            <button class="btn btn-ghost btn-sm" id="btn-next-day">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <section class="page" id="page-dashboard">
+        <div class="metrics-grid">
+          <div class="metric-card metric-gold">
+            <div class="metric-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            </div>
+            <div class="metric-info">
+              <span class="metric-label">RevPAR<br><small>每间可售房收入</small></span>
+              <span class="metric-value" id="m-revpar">¥0</span>
+            </div>
+          </div>
+          <div class="metric-card metric-blue">
+            <div class="metric-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            </div>
+            <div class="metric-info">
+              <span class="metric-label">ADR<br><small>平均房价</small></span>
+              <span class="metric-value" id="m-adr">¥0</span>
+            </div>
+          </div>
+          <div class="metric-card metric-green">
+            <div class="metric-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+            <div class="metric-info">
+              <span class="metric-label">入住率</span>
+              <span class="metric-value" id="m-occ">0%</span>
+            </div>
+          </div>
+          <div class="metric-card metric-red">
+            <div class="metric-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            </div>
+            <div class="metric-info">
+              <span class="metric-label">在住房间</span>
+              <span class="metric-value" id="m-occupied">0 / 40</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="overbooking-alert" id="overbooking-alert" style="display:none;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          <span id="overbooking-text"></span>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>实时房态图</h3>
+            <div class="legend">
+              <span class="legend-item"><span class="dot dot-vacant"></span>空闲</span>
+              <span class="legend-item"><span class="dot dot-occupied"></span>已入住</span>
+              <span class="legend-item"><span class="dot dot-reserved"></span>已预订</span>
+              <span class="legend-item"><span class="dot dot-risk"></span>超订风险</span>
+            </div>
+          </div>
+          <div class="room-grid-container" id="room-grid"></div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-pricing">
+        <div class="card">
+          <div class="card-header"><h3>基础房价设置</h3></div>
+          <div class="form-grid-2" id="base-price-form"></div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h3>旺季价格规则</h3>
+            <button class="btn btn-primary btn-sm" id="btn-add-peak">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              添加上旺季
+            </button>
+          </div>
+          <div class="peak-list" id="peak-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>提前预订折扣</h3></div>
+          <div class="discount-list" id="discount-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>超额预订设置</h3></div>
+          <div class="form-row">
+            <label>超订阈值（%）</label>
+            <input type="number" id="overbooking-threshold" min="0" max="20" step="0.5" class="input" />
+            <span class="hint">最多允许超出可售房数量的百分比，默认5%</span>
+          </div>
+        </div>
+        <div class="action-bar">
+          <button class="btn btn-primary" id="btn-save-pricing">保存定价设置</button>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-reports">
+        <div class="card">
+          <div class="card-header"><h3>过去30天收益趋势</h3></div>
+          <div class="chart-container" id="trend-chart"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>未来7天预订热力图</h3></div>
+          <div class="heatmap-container" id="heatmap-chart"></div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-data">
+        <div class="card">
+          <div class="card-header"><h3>房态快照</h3></div>
+          <div class="data-actions">
+            <button class="btn btn-primary" id="btn-export-snapshot">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              导出当前快照 (JSON)
+            </button>
+            <label class="btn btn-ghost">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              从快照恢复
+              <input type="file" accept=".json" id="import-snapshot" hidden />
+            </label>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>团队预订批量导入</h3></div>
+          <div class="data-actions">
+            <label class="btn btn-primary">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              导入CSV文件
+              <input type="file" accept=".csv" id="import-csv" hidden />
+            </label>
+            <button class="btn btn-ghost" id="btn-sample-csv">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              下载CSV模板
+            </button>
+          </div>
+          <div class="csv-hint">
+            <p><strong>CSV格式要求：</strong></p>
+            <code>团队名称,房型,房间数,入住日期,入住天数</code>
+            <p>房型支持：标准单人间 / 标准双人间 / 豪华套房 / 家庭套房</p>
+            <p>日期格式：YYYY-MM-DD</p>
+          </div>
+          <div class="import-result" id="import-result"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>系统操作</h3></div>
+          <div class="data-actions">
+            <button class="btn btn-danger" id="btn-reset">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              重置所有数据
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modal-backdrop">
+    <div class="modal" id="modal">
+      <div class="modal-content" id="modal-content"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
