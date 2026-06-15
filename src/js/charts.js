@@ -86,9 +86,9 @@ function renderTrendChart(container, data) {
   });
   svg.appendChild(occLine);
   const legend = [
-    { color: '#d4af37', label: '房费收入', dash: 'none' },
+    { color: '#d4af37', label: '房费收入(已结账)', dash: 'none' },
     { color: '#3b82f6', label: 'ADR(平均房价)', dash: '5,3' },
-    { color: '#10b981', label: '入住率', dash: '2,2' }
+    { color: '#10b981', label: '今日入住率', dash: '2,2' }
   ];
   let lx = padding.left;
   legend.forEach(l => {
@@ -101,7 +101,7 @@ function renderTrendChart(container, data) {
     const t = createSVG('text', { x: lx + 26, y: 20, fill: '#475569', 'font-size': 12 });
     t.textContent = l.label;
     svg.appendChild(t);
-    lx += 130;
+    lx += 160;
   });
   const tooltip = document.createElement('div');
   tooltip.style.cssText = 'position:absolute;background:rgba(30,58,95,0.95);color:#fff;padding:10px 14px;border-radius:8px;font-size:12px;pointer-events:none;opacity:0;transition:opacity 0.2s;z-index:10;box-shadow:0 4px 16px rgba(0,0,0,0.2);line-height:1.7;';
@@ -116,10 +116,9 @@ function renderTrendChart(container, data) {
       cx: x, cy: y, r: 5, fill: '#d4af37', stroke: '#fff', 'stroke-width': 2
     });
     circle.style.cursor = 'pointer';
-    circle.addEventListener('mouseenter', (e) => {
+    circle.addEventListener('mouseenter', () => {
       circle.setAttribute('r', 7);
-      tooltip.innerHTML = `<strong>${d.date}</strong><br>收入: ¥${d.revenue.toLocaleString()}<br>ADR: ¥${d.adr}<br>入住率: ${(d.occupancy * 100).toFixed(1)}%<br>在住: ${d.occupiedRooms}间`;
-      const rect = container.getBoundingClientRect();
+      tooltip.innerHTML = `<strong>${d.date}</strong><br>已结账收入: ¥${d.revenue.toLocaleString()}<br>ADR: ¥${d.adr}<br>入住率: ${(d.occupancy * 100).toFixed(1)}%<br>在住: ${d.occupiedRooms}间<br>结账间夜: ${d.soldRooms}`;
       tooltip.style.left = `${x + 15}px`;
       tooltip.style.top = `${y - 40}px`;
       tooltip.style.opacity = 1;
@@ -134,7 +133,6 @@ function renderTrendChart(container, data) {
 
 function renderHeatmap(container, heatmap) {
   container.innerHTML = '';
-  const days = heatmap[Object.keys(heatmap)[0]]?.length || 7;
   const typeOrder = [RoomTypes.SINGLE, RoomTypes.DOUBLE, RoomTypes.SUITE, RoomTypes.FAMILY];
   const wrapper = document.createElement('div');
   wrapper.className = 'heatmap-wrapper';
@@ -170,8 +168,9 @@ function renderHeatmap(container, heatmap) {
       const b = Math.round(55 + (68 - 55) * intensity);
       cell.style.backgroundColor = `rgba(${r},${g},${b},${0.25 + intensity * 0.65})`;
       cell.style.color = intensity > 0.5 ? '#fff' : '#1e3a5f';
-      cell.innerHTML = `<span class="hm-count">${d.count}</span><span class="hm-max">/10</span>`;
-      cell.title = `${RoomTypeLabels[type]} ${d.date}: 已预订 ${d.count} 间`;
+      const overTag = d.overbook > 0 ? `<span class="hm-over" title="其中超订${d.overbook}间">+${d.overbook}</span>` : '';
+      cell.innerHTML = `<span class="hm-count">${d.count}</span><span class="hm-max">/10${overTag}</span>`;
+      cell.title = `${RoomTypeLabels[type]} ${d.date}: 已预订 ${d.count} 间${d.overbook > 0 ? `（含超订 ${d.overbook} 间）` : ''}`;
       row.appendChild(cell);
     });
     wrapper.appendChild(row);
@@ -182,6 +181,7 @@ function renderHeatmap(container, heatmap) {
     <span>少</span>
     <div class="legend-gradient"></div>
     <span>多</span>
+    <span style="margin-left:20px;display:inline-flex;align-items:center;gap:6px;"><span class="hm-over-dot"></span>含超订</span>
   `;
   container.appendChild(wrapper);
   container.appendChild(legend);

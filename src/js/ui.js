@@ -1,21 +1,31 @@
 import {
   RoomTypes,
   RoomTypeLabels,
-  RoomStatus,
   getToday,
   setToday,
   addDays,
+  formatDate,
   getRooms,
   getPricing,
   savePricing,
-  subscribe
+  subscribe,
+  BookingStatus
 } from './state.js';
 
 import {
   getRoomStats,
   getOverbookingRisk,
   checkInRoom,
-  checkOutRoom
+  checkOutBooking,
+  getRoomDateStatus,
+  getActiveBookingsForRoom,
+  hasConflict,
+  reserveRoom,
+  canAcceptBooking,
+  willBeOverbook,
+  countBookingsOnDate,
+  bulkBook,
+  findAvailableRoom
 } from './rooms.js';
 
 import { getPriceInfo } from './pricing.js';
@@ -61,10 +71,6 @@ function getRoute() {
   return hash.replace('#/', '') || 'dashboard';
 }
 
-function navigate(route) {
-  location.hash = `#/${route}`;
-}
-
 function renderRoute() {
   const route = getRoute();
   document.querySelectorAll('.nav-item').forEach(el => {
@@ -95,16 +101,55 @@ function renderMetrics() {
 
 function renderOverbookingAlert() {
   const risks = getOverbookingRisk();
-  const atRisk = risks.filter(r => r.isAtRisk);
+  const atRisk = risks.filter(r => r.totalUsed > r.total || r.overbookUsed > 0);
   const alert = document.getElementById('overbooking-alert');
   const text = document.getElementById('overbooking-text');
   if (atRisk.length > 0) {
-    const names = atRisk.map(r => `${RoomTypeLabels[r.type]}(${r.used}/${r.total})`).join('、');
-    text.textContent = `超订预警：${names} 已满房，新增预订将受限！`;
+    const names = atRisk.map(r => {
+      const tag = r.overbookUsed > 0 ? `超订${r.overbookUsed}间` : '已满房';
+      return `${RoomTypeLabels[r.type]}(${r.totalUsed}/${r.allowed}，${tag})`;
+    }).join('、');
+    text.textContent = `超订预警：${names}，请注意管控风险！`;
     alert.style.display = 'flex';
   } else {
     alert.style.display = 'none';
   }
+}
+
+function getRoomCellDisplay(room) {
+  const today = getToday();
+  const s = getRoomDateStatus(room, today);
+  if (s.status === 'vacant') {
+    const upcoming = getActiveBookingsForRoom(room);
+    if (upcoming.length > 0) {
+      return {
+        class: 'reserved-future',
+        text: `待入住(${upcoming.length})`,
+        title: `今日空闲，已有 ${upcoming.length} 笔未来预订`,
+        hasBooking: true,
+        booking: null,
+        isOverbook: false
+      };
+    }
+    return {
+      class: 'vacant',
+      text: '空闲',
+      title: '今日空闲，可立即入住',
+      hasBooking: false,
+      booking: null,
+      isOverbook: false
+    };
+  }
+  const tag = s.status === 'checked_in' ? '在住' : '预订';
+  const overTag = s.isOverbook ? ' ⚠' : '';
+  return {
+    class: s.status + (s.isOverbook ? ' overbook' : ''),
+    text: `${tag}${overTag}`,
+    title: `${s.booking.guestName} · ${s.booking.checkInDate} 至 ${s.booking.checkOutDate} (${s.booking.nights}晚) · 房价 ¥${s.booking.dailyRate}/晚${s.isOverbook ? ' · 超订' : ''}`,
+    hasBooking: true,
+    booking: s.booking,
+    isOverbook: s.isOverbook
+  };
 }
 
 function renderRoomGrid() {
@@ -124,10 +169,11 @@ function renderRoomGrid() {
       <div class="room-type-name">${RoomTypeLabels[type]}</div>
       <div class="room-type-stats">
         空闲 <strong>${stats.vacant}</strong> ·
-        已住 <strong>${stats.occupied}</strong> ·
-        预订 <strong>${stats.reserved}</strong> ·
-        共 ${stats.total} 间
-        ${risk && risk.isAtRisk ? '<span class="stat-risk"> · ⚠ 超订风险</span>' : ''}
+        在住 <strong>${stats.occupied}</strong> ·
+        预订 <strong>${stats.reserved}</strong>
+        ${stats.overbook > 0 ? ` · 超订 <strong class="stat-risk">${stats.overbook}</strong>` : ''}
+         · 共 ${stats.total} 间
+        ${risk && risk.totalUsed > risk.total ? '<span class="stat-risk"> · ⚠ 超订中</span>' : ''}
       </div>
     `;
     section.appendChild(header);
@@ -135,16 +181,13 @@ function renderRoomGrid() {
     grid.className = 'room-grid';
     const typeRooms = rooms.filter(r => r.type === type).sort((a, b) => a.number - b.number);
     typeRooms.forEach(room => {
+      const display = getRoomCellDisplay(room);
       const cell = document.createElement('div');
-      const statusClass = room.status === RoomStatus.VACANT ? 'vacant'
-        : room.status === RoomStatus.OCCUPIED ? 'occupied' : 'reserved';
-      const riskClass = (risk && risk.isAtRisk && room.status === RoomStatus.VACANT) ? ' risk' : '';
-      const statusText = room.status === RoomStatus.VACANT ? '空闲'
-        : room.status === RoomStatus.OCCUPIED ? '在住' : '预订';
-      cell.className = `room-cell ${statusClass}${riskClass}`;
+      cell.className = `room-cell ${display.class}`;
+      cell.title = display.title;
       cell.innerHTML = `
         <span class="room-id">${room.id}</span>
-        <span class="room-status-text">${statusText}</span>
+        <span class="room-status-text">${display.text}</span>
       `;
       cell.addEventListener('click', () => handleRoomClick(room));
       grid.appendChild(cell);
@@ -155,18 +198,91 @@ function renderRoomGrid() {
 }
 
 function handleRoomClick(room) {
-  if (room.status === RoomStatus.VACANT) {
+  const today = getToday();
+  const todayStatus = getRoomDateStatus(room, today);
+  const allBookings = getActiveBookingsForRoom(room);
+  if (todayStatus.status === 'vacant' && allBookings.length === 0) {
     openCheckInModal(room);
   } else {
-    openCheckOutModal(room);
+    openRoomDetailModal(room, todayStatus, allBookings);
   }
+}
+
+function openRoomDetailModal(room, todayStatus, allBookings) {
+  const bookingCards = allBookings
+    .sort((a, b) => a.checkInDate.localeCompare(b.checkInDate))
+    .map(b => {
+      const isCheckedIn = b.status === BookingStatus.CHECKED_IN;
+      const isToday = getToday() >= b.checkInDate && getToday() < b.checkOutDate;
+      const overTag = b.isOverbook ? '<span class="tag tag-over">超订</span>' : '';
+      const statusTag = isCheckedIn ? '<span class="tag tag-in">在住</span>' : '<span class="tag tag-res">预订</span>';
+      const todayTag = isToday ? '<span class="tag tag-today">今日</span>' : '';
+      return `
+        <div class="booking-card ${isCheckedIn ? 'card-in' : 'card-res'}">
+          <div class="booking-head">
+            <strong>${b.guestName}</strong>
+            <div>${overTag} ${statusTag} ${todayTag}</div>
+          </div>
+          <div class="booking-body">
+            <div><span>入住</span>${b.checkInDate}</div>
+            <div><span>退房</span>${b.checkOutDate}</div>
+            <div><span>间夜</span>${b.nights}晚</div>
+            <div><span>房价</span>¥${b.dailyRate.toLocaleString()}/晚</div>
+            <div><span>总价</span>¥${b.totalPrice.toLocaleString()}</div>
+          </div>
+          <div class="booking-foot">
+            <button class="btn btn-primary btn-sm" data-checkout="${b.id}">
+              ${isCheckedIn ? '退房结账' : '取消预订'}
+            </button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  const html = `
+    <div class="modal-header">
+      <h3>房间详情 · ${room.id}</h3>
+      <button class="btn-icon" onclick="window.__closeModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="room-detail-info">
+        <div>房型：<strong>${RoomTypeLabels[room.type]}</strong></div>
+        <div>今日状态：<strong>${todayStatus.status === 'vacant' ? '空闲' : todayStatus.status === 'checked_in' ? '客人在住' : '已预订未入住'}</strong></div>
+      </div>
+      <div class="section-title">有效预订（${allBookings.length}）</div>
+      <div class="bookings-list">
+        ${bookingCards || '<div class="empty-state">当前暂无有效预订</div>'}
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="window.__closeModal()">关闭</button>
+      <button class="btn btn-primary" id="btn-add-booking">新增预订</button>
+    </div>
+  `;
+  openModal(html);
+  document.querySelectorAll('[data-checkout]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const bid = btn.dataset.checkout;
+      if (!confirm(`确认退房/取消该预订吗？`)) return;
+      try {
+        const r = checkOutBooking(room.id, bid);
+        showToast(`${r.guestName} 已退房，房费 ¥${r.total.toLocaleString()}`);
+        closeModal();
+        renderAll();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    });
+  });
+  document.getElementById('btn-add-booking').addEventListener('click', () => {
+    openCheckInModal(room);
+  });
 }
 
 function openCheckInModal(room) {
   const today = getToday();
   const html = `
     <div class="modal-header">
-      <h3>办理入住 · ${room.id}</h3>
+      <h3>办理入住/预订 · ${room.id}</h3>
       <button class="btn-icon" onclick="window.__closeModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="modal-body">
@@ -182,81 +298,75 @@ function openCheckInModal(room) {
         <label>入住天数</label>
         <input type="number" class="input" id="f-nights" value="1" min="1" max="30" />
       </div>
+      <div class="form-group">
+        <label>实际成交房价（元/晚，可选）</label>
+        <input type="number" class="input" id="f-manual-rate" min="0" step="1" placeholder="留空则按动态定价自动计算" />
+        <div class="hint" style="font-size:11px;color:var(--text-muted);margin-top:4px;">手动填写后，系统将以此价格作为最终成交价，不再应用旺季/提前折扣</div>
+      </div>
       <div class="price-preview" id="price-preview"></div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="window.__closeModal()">取消</button>
-      <button class="btn btn-primary" id="btn-confirm-checkin">确认入住</button>
+      <button class="btn btn-primary" id="btn-confirm-checkin">确认办理</button>
     </div>
   `;
   openModal(html);
   const updatePrice = () => {
     const nights = parseInt(document.getElementById('f-nights').value || '1', 10);
     const checkIn = document.getElementById('f-checkin').value || today;
-    const info = getPriceInfo(room.type, checkIn, nights);
-    const breakdown = info.dailyBreakdown.map(d =>
-      `<div class="daily-breakdown-row"><span>${d.date}</span><span>¥${d.rate.toLocaleString()}</span></div>`
-    ).join('');
-    document.getElementById('price-preview').innerHTML = `
-      <div class="price-row"><span class="label">房型</span><span class="value">${RoomTypeLabels[room.type]}</span></div>
-      <div class="price-row"><span class="label">基础价 × ${nights}晚</span><span class="value">¥${info.baseTotal.toLocaleString()}</span></div>
-      ${info.peakInfo.length > 0 ? `<div class="price-row"><span class="label">旺季加价</span><span class="value">${info.peakInfo.length}天涉及</span></div>` : ''}
-      ${info.discount < 1 ? `<div class="price-row discount"><span class="label">提前预订折扣 (${(info.discount * 10).toFixed(1)}折)</span><span class="value">-¥${info.savings.toLocaleString()}</span></div>` : ''}
-      <div class="daily-breakdown">${breakdown}</div>
-      <div class="price-row total"><span class="label">订单总价</span><span class="value">¥${info.total.toLocaleString()}</span></div>
-    `;
+    const manualRaw = document.getElementById('f-manual-rate').value;
+    const manualRate = manualRaw ? parseFloat(manualRaw) : null;
+    const hasConflictHere = hasConflict(room, checkIn, addDays(checkIn, nights));
+    if (hasConflictHere) {
+      document.getElementById('price-preview').innerHTML = `
+        <div style="color:var(--danger);font-weight:600;text-align:center;padding:8px 0;">
+          ⚠ 该房间在 ${checkIn} 至 ${addDays(checkIn, nights)} 已有预订，存在日期冲突
+        </div>
+      `;
+      return;
+    }
+    if (manualRate && manualRate > 0) {
+      const total = Math.round(manualRate) * nights;
+      document.getElementById('price-preview').innerHTML = `
+        <div class="price-row"><span class="label">房型</span><span class="value">${RoomTypeLabels[room.type]}</span></div>
+        <div class="price-row"><span class="label">手动房价</span><span class="value">¥${Math.round(manualRate).toLocaleString()} / 晚</span></div>
+        <div class="price-row"><span class="label">入住天数</span><span class="value">${nights} 晚</span></div>
+        <div class="price-row total"><span class="label">订单总价</span><span class="value">¥${total.toLocaleString()}</span></div>
+      `;
+    } else {
+      const info = getPriceInfo(room.type, checkIn, nights);
+      const breakdown = info.dailyBreakdown.map(d =>
+        `<div class="daily-breakdown-row"><span>${d.date}</span><span>¥${d.rate.toLocaleString()}</span></div>`
+      ).join('');
+      document.getElementById('price-preview').innerHTML = `
+        <div class="price-row"><span class="label">房型</span><span class="value">${RoomTypeLabels[room.type]}</span></div>
+        <div class="price-row"><span class="label">基础价 × ${nights}晚</span><span class="value">¥${info.baseTotal.toLocaleString()}</span></div>
+        ${info.peakInfo.length > 0 ? `<div class="price-row"><span class="label">旺季加价</span><span class="value">${info.peakInfo.length}天涉及</span></div>` : ''}
+        ${info.discount < 1 ? `<div class="price-row discount"><span class="label">提前预订折扣 (${(info.discount * 10).toFixed(1)}折)</span><span class="value">-¥${info.savings.toLocaleString()}</span></div>` : ''}
+        <div class="daily-breakdown">${breakdown}</div>
+        <div class="price-row total"><span class="label">订单总价（动态定价）</span><span class="value">¥${info.total.toLocaleString()}</span></div>
+      `;
+    }
   };
   updatePrice();
   document.getElementById('f-nights').addEventListener('input', updatePrice);
   document.getElementById('f-checkin').addEventListener('change', updatePrice);
+  document.getElementById('f-manual-rate').addEventListener('input', updatePrice);
   document.getElementById('btn-confirm-checkin').addEventListener('click', () => {
     const guestName = document.getElementById('f-guest').value.trim();
     const checkInDate = document.getElementById('f-checkin').value;
     const nights = parseInt(document.getElementById('f-nights').value, 10);
+    const manualRaw = document.getElementById('f-manual-rate').value;
+    const manualRate = manualRaw ? parseFloat(manualRaw) : null;
     if (!guestName) { showToast('请输入客人姓名', 'error'); return; }
     if (!checkInDate) { showToast('请选择入住日期', 'error'); return; }
     if (!nights || nights < 1) { showToast('请输入有效入住天数', 'error'); return; }
     try {
-      checkInRoom(room.id, { guestName, checkInDate, nights });
-      showToast(`${guestName} 入住成功！`);
-      closeModal();
-      renderAll();
-    } catch (e) {
-      showToast(e.message, 'error');
-    }
-  });
-}
-
-function openCheckOutModal(room) {
-  const total = room.totalPrice || (room.dailyRate || 0) * (room.nights || 0);
-  const html = `
-    <div class="modal-header">
-      <h3>退房 · ${room.id}</h3>
-      <button class="btn-icon" onclick="window.__closeModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-    </div>
-    <div class="modal-body">
-      <div class="guest-info">
-        <div class="guest-info-row"><span class="label">客人姓名</span><span class="value">${room.guestName || '-'}</span></div>
-        <div class="guest-info-row"><span class="label">房型</span><span class="value">${RoomTypeLabels[room.type]}</span></div>
-        <div class="guest-info-row"><span class="label">入住日期</span><span class="value">${room.checkInDate || '-'}</span></div>
-        <div class="guest-info-row"><span class="label">退房日期</span><span class="value">${room.checkOutDate || '-'}</span></div>
-        <div class="guest-info-row"><span class="label">入住天数</span><span class="value">${room.nights || 0} 晚</span></div>
-        <div class="guest-info-row"><span class="label">日均房价</span><span class="value">¥${(room.dailyRate || 0).toLocaleString()}</span></div>
-      </div>
-      <div class="price-preview">
-        <div class="price-row total"><span class="label">应收房费</span><span class="value">¥${total.toLocaleString()}</span></div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="window.__closeModal()">取消</button>
-      <button class="btn btn-primary" id="btn-confirm-checkout">确认退房并结账</button>
-    </div>
-  `;
-  openModal(html);
-  document.getElementById('btn-confirm-checkout').addEventListener('click', () => {
-    try {
-      const r = checkOutRoom(room.id);
-      showToast(`${r.guestName} 已退房，房费 ¥${r.total.toLocaleString()}`);
+      const opts = { guestName, checkInDate, nights };
+      if (manualRate && manualRate > 0) opts.manualRate = manualRate;
+      const result = checkInRoom(room.id, opts);
+      const tag = result.booking.isOverbook ? '（超订）' : '';
+      showToast(`${guestName} 预订成功${tag}！${checkInDate} 入住 ${nights} 晚，总价 ¥${result.booking.totalPrice.toLocaleString()}`);
       closeModal();
       renderAll();
     } catch (e) {
@@ -366,11 +476,7 @@ function savePricingFromForm() {
     const idx = parseInt(el.dataset.idx, 10);
     const field = el.dataset.field;
     if (pricing.peakSeasons[idx]) {
-      if (field === 'multiplier') {
-        pricing.peakSeasons[idx][field] = parseFloat(el.value) || 1;
-      } else {
-        pricing.peakSeasons[idx][field] = el.value;
-      }
+      pricing.peakSeasons[idx][field] = field === 'multiplier' ? (parseFloat(el.value) || 1) : el.value;
     }
   });
   document.querySelectorAll('#discount-list input').forEach(el => {
@@ -380,7 +486,7 @@ function savePricingFromForm() {
       pricing.advanceDiscounts[idx][field] = parseFloat(el.value) || 0;
     }
   });
-  pricing.overbookingThreshold = parseFloat(document.getElementById('overbooking-threshold').value) / 100 || 0.05;
+  pricing.overbookingThreshold = (parseFloat(document.getElementById('overbooking-threshold').value) || 5) / 100;
   savePricing(pricing);
   showToast('定价设置已保存');
   renderAll();
@@ -450,7 +556,7 @@ function bindEvents() {
     try {
       const results = await importTeamCSV(file);
       resultEl.className = 'import-result success';
-      resultEl.textContent = `成功导入 ${results.length} 条团队预订记录`;
+      resultEl.textContent = `成功导入 ${results.length} 条团队预订记录（按日期自动分配房间）`;
       showToast(`团队预订导入成功（${results.length}间）`);
       renderAll();
     } catch (err) {
@@ -473,6 +579,27 @@ function bindEvents() {
   });
   window.addEventListener('hashchange', renderRoute);
   subscribe(renderAll);
+
+  window.__test = {
+    getTodayMetrics,
+    getBookingHeatmap,
+    getRooms,
+    getToday,
+    addDays,
+    formatDate,
+    canAcceptBooking,
+    willBeOverbook,
+    checkInRoom,
+    reserveRoom,
+    checkOutBooking,
+    bulkBook,
+    findAvailableRoom,
+    getRoomDateStatus,
+    countBookingsOnDate,
+    getActiveBookingsForRoom,
+    BookingStatus,
+    RoomTypes
+  };
 }
 
 export {

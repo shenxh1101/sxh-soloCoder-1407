@@ -26,10 +26,10 @@ const RoomTypePrefix = {
   [RoomTypes.FAMILY]: 'F'
 };
 
-const RoomStatus = {
-  VACANT: 'vacant',
-  OCCUPIED: 'occupied',
-  RESERVED: 'reserved'
+const BookingStatus = {
+  RESERVED: 'reserved',
+  CHECKED_IN: 'checked_in',
+  CHECKED_OUT: 'checked_out'
 };
 
 const listeners = new Set();
@@ -77,6 +77,19 @@ function diffDays(start, end) {
   return Math.round((e - s) / (1000 * 60 * 60 * 24));
 }
 
+function datesOverlap(aStart, aEnd, bStart, bEnd) {
+  return aStart < bEnd && bStart < aEnd;
+}
+
+function bookingDatesOverlap(booking, checkInDate, checkOutDate) {
+  if (booking.status === BookingStatus.CHECKED_OUT) return false;
+  return datesOverlap(booking.checkInDate, booking.checkOutDate, checkInDate, checkOutDate);
+}
+
+function genId(prefix = 'id') {
+  return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+}
+
 function getToday() {
   return loadFromStorage(STORAGE_KEYS.TODAY, formatDate(new Date()));
 }
@@ -84,6 +97,35 @@ function getToday() {
 function setToday(dateStr) {
   saveToStorage(STORAGE_KEYS.TODAY, dateStr);
   notify();
+}
+
+function migrateLegacyRoom(room) {
+  if (room.bookings) return room;
+  const bookings = [];
+  if (room.status && room.status !== 'vacant') {
+    const bookingStatus = room.status === 'occupied' ? BookingStatus.CHECKED_IN : BookingStatus.RESERVED;
+    if (room.checkInDate && room.checkOutDate) {
+      bookings.push({
+        id: genId('bk'),
+        guestName: room.guestName || '未命名客人',
+        checkInDate: room.checkInDate,
+        checkOutDate: room.checkOutDate,
+        nights: room.nights || diffDays(room.checkInDate, room.checkOutDate),
+        dailyRate: room.dailyRate || 0,
+        totalPrice: room.totalPrice || 0,
+        dailyBreakdown: room.dailyBreakdown || [],
+        bookingDate: room.bookingDate || getToday(),
+        status: bookingStatus,
+        isOverbook: false
+      });
+    }
+  }
+  return {
+    id: room.id,
+    type: room.type,
+    number: room.number,
+    bookings
+  };
 }
 
 function createDefaultRooms() {
@@ -95,7 +137,7 @@ function createDefaultRooms() {
         id: `${RoomTypePrefix[type]}-${String(i).padStart(2, '0')}`,
         type,
         number: i,
-        status: RoomStatus.VACANT
+        bookings: []
       });
     }
   });
@@ -103,7 +145,19 @@ function createDefaultRooms() {
 }
 
 function getRooms() {
-  return loadFromStorage(STORAGE_KEYS.ROOMS, createDefaultRooms());
+  const raw = localStorage.getItem(STORAGE_KEYS.ROOMS);
+  if (raw === null) {
+    const def = createDefaultRooms();
+    saveToStorage(STORAGE_KEYS.ROOMS, def);
+    return def;
+  }
+  try {
+    return JSON.parse(raw).map(migrateLegacyRoom);
+  } catch {
+    const def = createDefaultRooms();
+    saveToStorage(STORAGE_KEYS.ROOMS, def);
+    return def;
+  }
 }
 
 function saveRooms(rooms) {
@@ -129,7 +183,19 @@ function createDefaultPricing() {
 }
 
 function getPricing() {
-  return loadFromStorage(STORAGE_KEYS.PRICING, createDefaultPricing());
+  const raw = localStorage.getItem(STORAGE_KEYS.PRICING);
+  if (raw === null) {
+    const def = createDefaultPricing();
+    saveToStorage(STORAGE_KEYS.PRICING, def);
+    return def;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const def = createDefaultPricing();
+    saveToStorage(STORAGE_KEYS.PRICING, def);
+    return def;
+  }
 }
 
 function savePricing(pricing) {
@@ -156,7 +222,19 @@ function createDefaultRevenueHistory() {
 }
 
 function getRevenueHistory() {
-  return loadFromStorage(STORAGE_KEYS.REVENUE, createDefaultRevenueHistory());
+  const raw = localStorage.getItem(STORAGE_KEYS.REVENUE);
+  if (raw === null) {
+    const def = createDefaultRevenueHistory();
+    saveToStorage(STORAGE_KEYS.REVENUE, def);
+    return def;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const def = createDefaultRevenueHistory();
+    saveToStorage(STORAGE_KEYS.REVENUE, def);
+    return def;
+  }
 }
 
 function saveRevenueHistory(history) {
@@ -188,7 +266,7 @@ export {
   RoomTypes,
   RoomTypeLabels,
   RoomTypePrefix,
-  RoomStatus,
+  BookingStatus,
   STORAGE_KEYS,
   subscribe,
   getToday,
@@ -196,6 +274,9 @@ export {
   formatDate,
   addDays,
   diffDays,
+  datesOverlap,
+  bookingDatesOverlap,
+  genId,
   getRooms,
   saveRooms,
   getPricing,

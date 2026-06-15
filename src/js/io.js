@@ -9,10 +9,11 @@ import {
   getToday,
   setToday,
   createDefaultRooms,
-  createDefaultPricing
+  createDefaultPricing,
+  addDays
 } from './state.js';
 
-import { bulkCheckIn, canCheckIn } from './rooms.js';
+import { bulkBook, canAcceptBooking } from './rooms.js';
 
 const RoomTypeMap = {
   '标准单人间': RoomTypes.SINGLE,
@@ -31,7 +32,7 @@ const RoomTypeMap = {
 
 function exportSnapshot() {
   const snapshot = {
-    version: '1.0',
+    version: '2.0',
     exportedAt: new Date().toISOString(),
     currentDate: getToday(),
     rooms: getRooms(),
@@ -118,8 +119,9 @@ function parseTeamBookings(text) {
       errors.push(`第${idx + 2}行: 无效的入住天数`);
       return;
     }
-    if (!canCheckIn(roomType, count)) {
-      errors.push(`第${idx + 2}行: ${typeRaw} 超订风险，无法预订 ${count} 间`);
+    const check = canAcceptBooking(roomType, checkInDate, nights);
+    if (!check.ok) {
+      errors.push(`第${idx + 2}行: ${typeRaw} 在 ${check.date} 已达超订上限（${check.used}/${check.allowed}），无法预订 ${count} 间`);
       return;
     }
     bookings.push({ teamName, roomType, count, checkInDate, nights });
@@ -137,7 +139,7 @@ function importTeamCSV(file) {
           reject(new Error(errors.join('\n')));
           return;
         }
-        const result = bulkCheckIn(bookings);
+        const result = bulkBook(bookings);
         if (result.errors.length > 0) {
           reject(new Error(result.errors.join('\n')));
           return;
@@ -154,11 +156,12 @@ function importTeamCSV(file) {
 
 function generateSampleCSV() {
   const today = getToday();
+  const tomorrow = addDays(today, 1);
   const content = [
     '团队名称,房型,房间数,入住日期,入住天数',
-    `示例旅游团A,标准双人间,3,${today},3`,
-    `企业会议团,豪华套房,2,${today},2`,
-    `家庭旅行团,家庭套房,4,${today},5`
+    `今日入住团,标准双人间,3,${today},3`,
+    `明天预订团,豪华套房,2,${tomorrow},2`,
+    `远期家庭团,家庭套房,4,${addDays(today, 7)},5`
   ].join('\n');
   const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);

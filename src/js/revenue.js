@@ -1,6 +1,6 @@
 import {
   RoomTypes,
-  RoomStatus,
+  BookingStatus,
   getRooms,
   getRevenueHistory,
   getToday,
@@ -8,35 +8,39 @@ import {
 } from './state.js';
 
 const TOTAL_ROOMS = 40;
+const ROOMS_PER_TYPE = 10;
 
 function getTodayMetrics() {
   const today = getToday();
   const rooms = getRooms();
   const history = getRevenueHistory();
   const todayRecord = history.find(r => r.date === today);
-  const occupiedRooms = rooms.filter(
-    r => r.status !== RoomStatus.VACANT
-  ).length;
-  const checkedOutToday = todayRecord ? todayRecord.soldRooms : 0;
-  const revenueToday = todayRecord ? todayRecord.revenue : 0;
-  const currentRevenue = rooms.reduce((sum, r) => {
-    if (r.status !== RoomStatus.VACANT) {
-      return sum + (r.totalPrice || 0);
-    }
-    return sum;
-  }, 0);
-  const totalRevenue = revenueToday + currentRevenue;
-  const soldRooms = checkedOutToday + occupiedRooms;
-  const occupancy = TOTAL_ROOMS > 0 ? occupiedRooms / TOTAL_ROOMS : 0;
-  const adr = soldRooms > 0 ? totalRevenue / soldRooms : 0;
-  const revpar = TOTAL_ROOMS > 0 ? totalRevenue / TOTAL_ROOMS : 0;
+
+  let occupiedToday = 0;
+  rooms.forEach(room => {
+    (room.bookings || []).forEach(b => {
+      if (b.status !== BookingStatus.CHECKED_IN) return;
+      if (today >= b.checkInDate && today < b.checkOutDate) {
+        occupiedToday++;
+      }
+    });
+  });
+
+  const checkedOutRevenue = todayRecord ? todayRecord.revenue : 0;
+  const checkedOutSoldRooms = todayRecord ? todayRecord.soldRooms : 0;
+
+  const occupancy = TOTAL_ROOMS > 0 ? occupiedToday / TOTAL_ROOMS : 0;
+  const adr = checkedOutSoldRooms > 0 ? checkedOutRevenue / checkedOutSoldRooms : 0;
+  const revpar = TOTAL_ROOMS > 0 ? checkedOutRevenue / TOTAL_ROOMS : 0;
+
   return {
     date: today,
     occupancy,
     adr: Math.round(adr),
     revpar: Math.round(revpar),
-    revenue: totalRevenue,
-    occupiedRooms,
+    revenue: checkedOutRevenue,
+    occupiedRooms: occupiedToday,
+    checkedOutRooms: checkedOutSoldRooms,
     totalRooms: TOTAL_ROOMS
   };
 }
@@ -68,14 +72,18 @@ function getBookingHeatmap(days = 7) {
     for (let i = 0; i < days; i++) {
       const date = addDays(today, i);
       let count = 0;
+      let overbook = 0;
       rooms.forEach(r => {
-        if (r.type === type && r.status !== RoomStatus.VACANT && r.checkInDate && r.checkOutDate) {
-          if (date >= r.checkInDate && date < r.checkOutDate) {
+        if (r.type !== type) return;
+        (r.bookings || []).forEach(b => {
+          if (b.status === BookingStatus.CHECKED_OUT) return;
+          if (date >= b.checkInDate && date < b.checkOutDate) {
             count++;
+            if (b.isOverbook) overbook++;
           }
-        }
+        });
       });
-      heatmap[type].push({ date, count });
+      heatmap[type].push({ date, count, overbook, normal: count - overbook });
     }
   });
   return heatmap;
